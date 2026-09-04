@@ -36,7 +36,7 @@ import pandas as pd
 import numpy as np
 import joblib
 
-from .auth import router as auth_router, init_db, get_current_user
+from backend.auth import router as auth_router, init_db, get_current_user
 
 app = FastAPI(title="RailVinyas API")
 
