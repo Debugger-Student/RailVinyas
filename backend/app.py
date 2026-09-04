@@ -25,6 +25,9 @@ All routes below except / and /api/auth/* require a valid Bearer token
 (see get_current_user in auth.py). Send it as:
     Authorization: Bearer <token>
 """
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -33,7 +36,7 @@ import pandas as pd
 import numpy as np
 import joblib
 
-from auth import router as auth_router, init_db, get_current_user
+from .auth import router as auth_router, init_db, get_current_user
 
 app = FastAPI(title="RailVinyas API")
 
@@ -47,7 +50,8 @@ app.include_router(auth_router)
 # Allow your website (running on a different port/domain) to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten this to your actual website's URL before going live
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -188,6 +192,27 @@ def recommend(req: BlockRequest, user=Depends(get_current_user)):
 def health():
     return {"status": "RailVinyas API is running"}
 
+# ---------------------------------------------------------
+# Serve React frontend
+# ---------------------------------------------------------
+
+FRONTEND_DIST = BASE_DIR / "railvinyas-frontend" / "dist"
+
+if FRONTEND_DIST.exists():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=FRONTEND_DIST / "assets"),
+        name="assets"
+    )
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        requested_file = FRONTEND_DIST / full_path
+
+        if requested_file.is_file():
+            return FileResponse(requested_file)
+
+        return FileResponse(FRONTEND_DIST / "index.html")
 
 if __name__ == "__main__":
     # Lets you also just run: python app.py
