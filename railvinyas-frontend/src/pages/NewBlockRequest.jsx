@@ -2,7 +2,6 @@
 import { useEffect, useState } from "react";
 import { apiFetch, ApiError } from "../api";
 import { Card, TrafficBadge, Spinner } from "../components/ui";
-
 const MAINTENANCE_TYPES = {
   "Track Repair": "Tamping Machine",
   "Rail Welding": "Rail Crane",
@@ -15,11 +14,12 @@ const MAINTENANCE_TYPES = {
 const WEATHER_OPTIONS = ["Clear", "Light Rain", "Heavy Rain", "Fog", "Extreme Heat"];
 
 export default function NewBlockRequest() {
-  const [sections, setSections] = useState([]);
-  const [sectionsLoading, setSectionsLoading] = useState(true);
+  const [stationQuery, setStationQuery] = useState({ from: "", to: "" });
+  const [stationOptions, setStationOptions] = useState({ from: [], to: [] });
+  const [resolvedSection, setResolvedSection] = useState(null);
+  const [resolveError, setResolveError] = useState("");
 
   const [form, setForm] = useState({
-    section_id: "",
     maintenance_type: "Track Repair",
     priority: "Medium",
     weather: "Clear",
@@ -32,12 +32,42 @@ export default function NewBlockRequest() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // Debounced station search for both From/To fields
   useEffect(() => {
-    apiFetch("/api/sections")
-      .then(setSections)
-      .catch((err) => setError(err.message))
-      .finally(() => setSectionsLoading(false));
-  }, []);
+    const t = setTimeout(() => {
+      if (stationQuery.from.length >= 2) {
+        apiFetch(`/api/stations?q=${encodeURIComponent(stationQuery.from)}&limit=8`)
+          .then((r) => setStationOptions((s) => ({ ...s, from: r }))).catch(() => {});
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [stationQuery.from]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (stationQuery.to.length >= 2) {
+        apiFetch(`/api/stations?q=${encodeURIComponent(stationQuery.to)}&limit=8`)
+          .then((r) => setStationOptions((s) => ({ ...s, to: r }))).catch(() => {});
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [stationQuery.to]);
+
+  // Resolve to a section_id once both stations are picked
+  useEffect(() => {
+    setResolvedSection(null); setResolveError("");
+    if (stationQuery.fromCode && stationQuery.toCode) {
+      apiFetch(`/api/sections/resolve?from_station=${stationQuery.fromCode}&to_station=${stationQuery.toCode}`)
+        .then(setResolvedSection)
+        .catch((err) => setResolveError(err.message));
+    }
+  }, [stationQuery.fromCode, stationQuery.toCode]);
+
+  const pickStation = (field, station) => {
+    setStationQuery((s) => ({ ...s, [field]: station.station_name, [`${field}Code`]: station.station_code }));
+    setStationOptions((s) => ({ ...s, [field]: [] }));
+  };
+
 
   const update = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
 
@@ -48,7 +78,7 @@ export default function NewBlockRequest() {
       const res = await apiFetch("/api/recommend", {
         method: "POST",
         body: JSON.stringify({
-          section_id: form.section_id,
+          section_id: resolvedSection.section_id,
           maintenance_type: form.maintenance_type,
           required_asset_type: MAINTENANCE_TYPES[form.maintenance_type],
           priority: form.priority,
@@ -77,18 +107,49 @@ export default function NewBlockRequest() {
 
       <Card>
         <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="sm:col-span-2">
-            <label className="block text-sm font-medium text-navy mb-1">Section</label>
-            {sectionsLoading ? (
-              <Spinner label="Loading sections..." />
-            ) : (
-              <input list="sections-list" required value={form.section_id} onChange={update("section_id")}
-                placeholder="Search a section (e.g. CLA-MTN)"
-                className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky/40 focus:border-sky" />
+          <div>
+            <label className="block text-sm font-medium text-navy mb-1">From Station</label>
+            <input value={stationQuery.from} onChange={(e) => setStationQuery((s) => ({ ...s, from: e.target.value, fromCode: null }))}
+              placeholder="Search station name or code"
+              className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky/40 focus:border-sky" />
+            {stationOptions.from.length > 0 && (
+              <div className="border border-gray-200 rounded-md mt-1 max-h-40 overflow-y-auto bg-white shadow-sm absolute z-10">
+                {stationOptions.from.map((s) => (
+                  <div key={s.station_code} onClick={() => pickStation("from", s)}
+                    className="px-3 py-1.5 text-sm hover:bg-sky/10 cursor-pointer">
+                    {s.station_name} <span className="text-gray-400">({s.station_code})</span>
+                  </div>
+                ))}
+              </div>
             )}
-            <datalist id="sections-list">
-              {sections.map((s) => <option key={s} value={s} />)}
-            </datalist>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-navy mb-1">To Station</label>
+            <input value={stationQuery.to} onChange={(e) => setStationQuery((s) => ({ ...s, to: e.target.value, toCode: null }))}
+              placeholder="Search station name or code"
+              className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky/40 focus:border-sky" />
+            {stationOptions.to.length > 0 && (
+              <div className="border border-gray-200 rounded-md mt-1 max-h-40 overflow-y-auto bg-white shadow-sm absolute z-10">
+                {stationOptions.to.map((s) => (
+                  <div key={s.station_code} onClick={() => pickStation("to", s)}
+                    className="px-3 py-1.5 text-sm hover:bg-sky/10 cursor-pointer">
+                    {s.station_name} <span className="text-gray-400">({s.station_code})</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="sm:col-span-2">
+            {resolveError && (
+              <div className="text-sm text-orange-700 bg-orange-50 border border-orange-200 rounded-md px-3 py-2">{resolveError}</div>
+            )}
+            {resolvedSection && (
+              <div className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-md px-3 py-2">
+                Section found: <span className="font-semibold">{resolvedSection.section_id}</span> ({resolvedSection.from_station_name} ↔ {resolvedSection.to_station_name})
+              </div>
+            )}
           </div>
 
           <div>
@@ -152,10 +213,11 @@ export default function NewBlockRequest() {
           )}
 
           <div className="sm:col-span-2">
-            <button type="submit" disabled={loading}
+            <button type="submit" disabled={loading || !resolvedSection}
               className="bg-sky text-white font-semibold px-6 py-2.5 rounded-md hover:bg-sky/90 transition-colors disabled:opacity-60">
               {loading ? "Calculating best window..." : "Get Recommendation"}
             </button>
+            {!resolvedSection && <p className="text-xs text-gray-400 mt-2">Select both From and To stations to continue.</p>}
           </div>
         </form>
       </Card>
