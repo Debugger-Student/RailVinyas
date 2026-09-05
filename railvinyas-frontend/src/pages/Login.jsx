@@ -1,141 +1,366 @@
-// src/pages/Login.jsx
-import { useState, useRef } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { apiFetch, getDeviceId, ApiError } from "../api";
-import { useAuth } from "../context/AuthContext";
+import {
+  useState,
+} from "react";
+
+import {
+  Link,
+  useNavigate,
+} from "react-router-dom";
+
+import {
+  login,
+  verifyOtp,
+} from "../api";
+
+import {
+  useAuth,
+} from "../context/AuthContext";
+
 
 export default function Login() {
-  const [step, setStep] = useState(1); // 1 = credentials, 2 = OTP
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [otpCode, setOtpCode] = useState("");
-  const [error, setError] = useState("");
-  const [info, setInfo] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [cooldown, setCooldown] = useState(0);
-  const cooldownTimer = useRef(null);
 
-  const { login } = useAuth();
-  const navigate = useNavigate();
-  const deviceId = getDeviceId();
+  const navigate =
+    useNavigate();
 
-  const startCooldown = () => {
-    setCooldown(30);
-    clearInterval(cooldownTimer.current);
-    cooldownTimer.current = setInterval(() => {
-      setCooldown((c) => {
-        if (c <= 1) { clearInterval(cooldownTimer.current); return 0; }
-        return c - 1;
-      });
-    }, 1000);
-  };
+  const {
+    loginSuccess,
+  } = useAuth();
 
-  const submitCredentials = async (e) => {
-    e?.preventDefault();
-    setError(""); setInfo(""); setLoading(true);
+
+  const [step, setStep] =
+    useState(1);
+
+  const [email, setEmail] =
+    useState("");
+
+  const [password, setPassword] =
+    useState("");
+
+  const [otp, setOtp] =
+    useState("");
+
+  const [message, setMessage] =
+    useState("");
+
+  const [error, setError] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(false);
+
+
+  async function handleLogin(event) {
+
+    event.preventDefault();
+
+    setError("");
+    setMessage("");
+
+    setLoading(true);
+
+
     try {
-      const res = await apiFetch("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ email, password, device_id: deviceId }),
-      });
-      if (res.status === "success") {
-        login(res);
+
+      const response =
+        await login(
+          email.trim(),
+          password
+        );
+
+
+      // ----------------------------------------------------
+      // Normal successful login
+      // ----------------------------------------------------
+
+      if (
+        response.status ===
+        "success"
+      ) {
+
+        loginSuccess(response);
+
         navigate("/dashboard");
-      } else if (res.status === "verification_required") {
-        setInfo(res.message);
-        setStep(2);
-        startCooldown();
+
+        return;
       }
+
+
+      // ----------------------------------------------------
+      // OTP required
+      // ----------------------------------------------------
+
+      if (
+        response.status ===
+        "verification_required"
+      ) {
+
+        setStep(2);
+
+        setMessage(
+          response.dev_otp
+            ? `Verification required. Development OTP: ${response.dev_otp}`
+            : response.message
+        );
+
+        return;
+      }
+
+
+      setError(
+        response.message ||
+        "Unexpected login response."
+      );
+
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Login failed. Please try again.");
+
+      setError(
+        err.message ||
+        "Login failed. Please try again."
+      );
+
     } finally {
+
       setLoading(false);
     }
-  };
+  }
 
-  const submitOtp = async (e) => {
-    e.preventDefault();
-    setError(""); setLoading(true);
+
+  async function handleVerifyOtp(
+    event
+  ) {
+
+    event.preventDefault();
+
+    setError("");
+    setMessage("");
+
+    if (
+      !/^\d{6}$/.test(otp)
+    ) {
+
+      setError(
+        "Enter a valid 6-digit OTP."
+      );
+
+      return;
+    }
+
+
+    setLoading(true);
+
+
     try {
-      const res = await apiFetch("/api/auth/verify-otp", {
-        method: "POST",
-        body: JSON.stringify({ email, device_id: deviceId, otp_code: otpCode }),
-      });
-      login(res);
-      navigate("/dashboard");
+
+      const response =
+        await verifyOtp(
+          email.trim(),
+          otp
+        );
+
+
+      if (
+        response.status ===
+        "success"
+      ) {
+
+        loginSuccess(response);
+
+        navigate("/dashboard");
+
+        return;
+      }
+
+
+      setError(
+        "OTP verification failed."
+      );
+
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Verification failed.");
+
+      setError(
+        err.message ||
+        "Incorrect verification code."
+      );
+
     } finally {
+
       setLoading(false);
     }
-  };
+  }
 
-  const resendCode = () => {
-    if (cooldown > 0) return;
-    submitCredentials();
-  };
+
+  function backToCredentials() {
+
+    setStep(1);
+    setOtp("");
+    setError("");
+    setMessage("");
+  }
+
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-sky/5 to-white px-4">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-6">
-          <div className="h-12 w-12 rounded-xl bg-navy flex items-center justify-center text-white font-bold text-lg mx-auto mb-3">RV</div>
-          <h1 className="text-2xl font-bold text-navy">RailVinyas</h1>
-          <p className="text-sm text-gray-500 mt-1">AI-Powered Railway Block Planning</p>
-        </div>
+    <div className="login-page">
 
-        <div className="bg-white border border-gray-100 rounded-lg shadow-sm p-6">
-          {error && (
-            <div className="mb-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</div>
-          )}
+      <div className="login-card">
 
-          {step === 1 && (
-            <form onSubmit={submitCredentials} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-navy mb-1">Email</label>
-                <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-                  className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky/40 focus:border-sky" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-navy mb-1">Password</label>
-                <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)}
-                  className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky/40 focus:border-sky" />
-              </div>
-              <button type="submit" disabled={loading}
-                className="w-full bg-sky text-white font-semibold py-2.5 rounded-md hover:bg-sky/90 transition-colors disabled:opacity-60">
-                {loading ? "Signing in..." : "Sign In"}
-              </button>
-            </form>
-          )}
+        <div className="brand">
+          <div className="logo">
+            RV
+          </div>
 
-          {step === 2 && (
-            <form onSubmit={submitOtp} className="space-y-4">
-              {info && (
-                <div className="text-sm text-navy bg-sky/10 border border-sky/20 rounded-md px-3 py-2">{info}</div>
-              )}
-              <div>
-                <label className="block text-sm font-medium text-navy mb-1">Verification Code</label>
-                <input type="text" inputMode="numeric" maxLength={6} required value={otpCode}
-                  onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
-                  placeholder="6-digit code"
-                  className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm tracking-[0.3em] text-center font-mono focus:outline-none focus:ring-2 focus:ring-sky/40 focus:border-sky" />
-              </div>
-              <button type="submit" disabled={loading || otpCode.length !== 6}
-                className="w-full bg-sky text-white font-semibold py-2.5 rounded-md hover:bg-sky/90 transition-colors disabled:opacity-60">
-                {loading ? "Verifying..." : "Verify & Sign In"}
-              </button>
-              <button type="button" onClick={resendCode} disabled={cooldown > 0}
-                className="w-full text-sm text-sky hover:underline disabled:text-gray-400 disabled:no-underline">
-                {cooldown > 0 ? `Resend code in ${cooldown}s` : "Resend code"}
-              </button>
-            </form>
-          )}
+          <h1>
+            RailVinyas
+          </h1>
 
-          <p className="text-sm text-gray-500 text-center mt-5">
-            Don't have an account? <Link to="/register" className="text-sky font-medium hover:underline">Register</Link>
+          <p>
+            AI-Powered Railway Block Planning
           </p>
         </div>
+
+
+        {error && (
+          <div className="error-message">
+            {error}
+          </div>
+        )}
+
+
+        {message && (
+          <div className="success-message">
+            {message}
+          </div>
+        )}
+
+
+        {step === 1 && (
+
+          <form
+            onSubmit={
+              handleLogin
+            }
+          >
+
+            <label>
+              Email
+            </label>
+
+            <input
+              type="email"
+              value={email}
+              onChange={(e) =>
+                setEmail(
+                  e.target.value
+                )
+              }
+              required
+              autoComplete="email"
+            />
+
+
+            <label>
+              Password
+            </label>
+
+            <input
+              type="password"
+              value={password}
+              onChange={(e) =>
+                setPassword(
+                  e.target.value
+                )
+              }
+              required
+              autoComplete="current-password"
+            />
+
+
+            <button
+              type="submit"
+              disabled={loading}
+            >
+              {loading
+                ? "Signing in..."
+                : "Sign In"}
+            </button>
+
+
+            <p>
+              Don't have an account?{" "}
+              <Link to="/register">
+                Register
+              </Link>
+            </p>
+
+          </form>
+        )}
+
+
+        {step === 2 && (
+
+          <form
+            onSubmit={
+              handleVerifyOtp
+            }
+          >
+
+            <h2>
+              Verify your device
+            </h2>
+
+            <p>
+              Enter the 6-digit
+              verification code.
+            </p>
+
+
+            <label>
+              Verification Code
+            </label>
+
+            <input
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              value={otp}
+              onChange={(e) =>
+                setOtp(
+                  e.target.value
+                    .replace(/\D/g, "")
+                    .slice(0, 6)
+                )
+              }
+              required
+              autoFocus
+            />
+
+
+            <button
+              type="submit"
+              disabled={
+                loading ||
+                otp.length !== 6
+              }
+            >
+              {loading
+                ? "Verifying..."
+                : "Verify OTP"}
+            </button>
+
+
+            <button
+              type="button"
+              onClick={
+                backToCredentials
+              }
+            >
+              Back to Login
+            </button>
+
+          </form>
+        )}
+
       </div>
+
     </div>
   );
 }
