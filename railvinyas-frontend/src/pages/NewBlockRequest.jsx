@@ -427,17 +427,17 @@ export default function NewBlockRequest() {
 
     try {
       const response = await apiFetch("/api/recommend", {
-        method: "POST",
-        body: JSON.stringify({
-          section_id: resolvedSection.section_id,
-          maintenance_type: form.maintenance_type,
-          required_asset_type: MAINTENANCE_TYPES[form.maintenance_type],
-          priority: form.priority,
-          weather: form.weather,
-          planned_duration_min: Number(form.planned_duration_min),
-          date: form.date,
-        }),
-      });
+  method: "POST",
+  body: {
+    section_id: resolvedSection.section_id,
+    maintenance_type: form.maintenance_type,
+    required_asset_type: MAINTENANCE_TYPES[form.maintenance_type],
+    priority: form.priority,
+    weather: form.weather,
+    planned_duration_min: Number(form.planned_duration_min),
+    date: form.date,
+  },
+  });
 
       setResult(response);
     } catch (err) {
