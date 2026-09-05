@@ -259,6 +259,15 @@ def send_otp_email(
     otp_code: str,
 ) -> bool:
 
+    # Always log OTP on the server.
+    # The OTP is never returned to the frontend.
+    print(
+        f"[auth] OTP for {to_email}: {otp_code}",
+        flush=True,
+    )
+
+   
+
     # Development/demo mode.
     if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
 
@@ -807,14 +816,14 @@ def login(
 
 
     # Demo fallback.
+    # OTP is intentionally not returned to the frontend.
+    # It is available in Render/server logs.
     if not was_emailed:
 
-        response["dev_otp"] = otp_code
-
-        response["message"] += (
-            " Email is not configured yet. "
-            "Use the development code shown "
-            "in the response."
+        response["message"] = (
+            "New device detected. "
+            "A verification code could not be delivered by email. "
+            "Please contact the administrator or check the server logs."
         )
 
 
