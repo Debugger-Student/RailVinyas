@@ -5,53 +5,94 @@ import { useAuth } from "../context/AuthContext";
 export function ProtectedRoute({ roles, children }) {
   const { session } = useAuth();
   const navigate = useNavigate();
+
   if (!session) {
     navigate("/login", { replace: true });
     return null;
   }
+
   if (roles && !roles.includes(session.role)) {
     return (
-      <div className="p-8 text-center text-navy">
-        <p className="text-lg font-semibold">You don't have access to this page.</p>
-        <p className="text-sm text-gray-500 mt-1">This section requires: {roles.join(" or ")}</p>
+      <div className="min-h-[60vh] flex items-center justify-center px-6">
+        <div className="max-w-md text-center">
+          <div className="mx-auto h-14 w-14 rounded-2xl bg-red-50 text-red-600 flex items-center justify-center text-xl font-bold">
+            !
+          </div>
+
+          <h2 className="text-xl font-bold text-navy mt-5">
+            Access restricted
+          </h2>
+
+          <p className="text-sm text-gray-500 mt-2 leading-6">
+            You don't have permission to access this section.
+          </p>
+
+          <div className="inline-flex mt-4 rounded-full bg-slate-50 border border-gray-200 px-3 py-1.5 text-xs text-gray-500">
+            Required role: {roles.join(" or ")}
+          </div>
+        </div>
       </div>
     );
   }
+
   return children;
 }
 
 const roleColors = {
   Admin: "bg-navy text-white",
   "Section Controller": "bg-sky text-white",
-  Viewer: "bg-gray-200 text-navy",
+  Viewer: "bg-slate-100 text-navy border border-slate-200",
 };
 
 export function RoleBadge({ role }) {
   return (
-    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${roleColors[role] || "bg-gray-200"}`}>
-      {role}
+    <span
+      className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-bold ${
+        roleColors[role] || "bg-slate-100 text-navy"
+      }`}
+    >
+      {role || "User"}
     </span>
   );
 }
 
 const trafficColors = {
-  LOW: "bg-green-100 text-green-700",
-  MEDIUM: "bg-yellow-100 text-yellow-700",
-  HIGH: "bg-orange-100 text-orange-700",
-  VERY_HIGH: "bg-red-100 text-red-700",
+  LOW: "bg-green-50 text-green-700 border-green-200",
+  MEDIUM: "bg-amber-50 text-amber-700 border-amber-200",
+  HIGH: "bg-orange-50 text-orange-700 border-orange-200",
+  VERY_HIGH: "bg-red-50 text-red-700 border-red-200",
 };
 
 export function TrafficBadge({ level }) {
   return (
-    <span className={`text-xs font-semibold px-2 py-0.5 rounded ${trafficColors[level] || "bg-gray-100 text-gray-600"}`}>
-      {level}
+    <span
+      className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1 rounded-full border ${
+        trafficColors[level] || "bg-gray-50 text-gray-600 border-gray-200"
+      }`}
+    >
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${
+          level === "LOW"
+            ? "bg-green-500"
+            : level === "MEDIUM"
+            ? "bg-amber-500"
+            : level === "HIGH"
+            ? "bg-orange-500"
+            : level === "VERY_HIGH"
+            ? "bg-red-500"
+            : "bg-gray-400"
+        }`}
+      />
+      {level || "UNKNOWN"}
     </span>
   );
 }
 
 export function Card({ children, className = "" }) {
   return (
-    <div className={`bg-white border border-gray-100 rounded-lg shadow-sm p-5 ${className}`}>
+    <div
+      className={`bg-white border border-gray-100 rounded-2xl shadow-sm ${className}`}
+    >
       {children}
     </div>
   );
@@ -59,24 +100,38 @@ export function Card({ children, className = "" }) {
 
 export function Spinner({ label = "Loading..." }) {
   return (
-    <div className="flex items-center gap-2 text-navy/70 text-sm py-4">
-      <svg className="animate-spin h-4 w-4 text-sky" viewBox="0 0 24 24" fill="none">
-        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-      </svg>
-      {label}
+    <div className="flex items-center gap-3 text-sm text-gray-500 py-5">
+      <span className="h-5 w-5 rounded-full border-2 border-sky/20 border-t-sky animate-spin" />
+      <span>{label}</span>
     </div>
   );
 }
 
 export function Toast({ message, type = "error", onClose }) {
   if (!message) return null;
-  const styles = type === "error" ? "bg-red-50 border-red-200 text-red-700" : "bg-green-50 border-green-200 text-green-700";
+
+  const styles =
+    type === "error"
+      ? "bg-red-50 border-red-200 text-red-700"
+      : "bg-green-50 border-green-200 text-green-700";
+
   return (
-    <div className={`fixed top-4 right-4 z-50 border rounded-lg px-4 py-3 shadow-md text-sm max-w-sm ${styles}`}>
-      <div className="flex justify-between items-start gap-3">
-        <span>{message}</span>
-        <button onClick={onClose} className="font-bold leading-none">×</button>
+    <div className="fixed top-5 right-5 z-50 max-w-sm">
+      <div
+        className={`border rounded-xl px-4 py-3 shadow-lg text-sm ${styles}`}
+      >
+        <div className="flex items-start gap-3">
+          <span className="font-bold">{type === "error" ? "!" : "✓"}</span>
+
+          <span className="flex-1">{message}</span>
+
+          <button
+            onClick={onClose}
+            className="font-bold opacity-50 hover:opacity-100"
+          >
+            ×
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -86,9 +141,14 @@ export function Layout({ children }) {
   const { session, logout } = useAuth();
   const navigate = useNavigate();
 
-  const navItem = "px-3 py-2 text-sm font-medium rounded-md transition-colors";
-  const active = "text-sky bg-sky/10";
-  const inactive = "text-navy/80 hover:text-sky hover:bg-sky/5";
+  const navItem =
+    "px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200";
+
+  const active =
+    "text-sky bg-sky/10 shadow-sm";
+
+  const inactive =
+    "text-navy/75 hover:text-sky hover:bg-sky/5";
 
   const handleLogout = () => {
     logout();
@@ -96,46 +156,125 @@ export function Layout({ children }) {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-white">
-      <header className="border-t-[3px] border-b border-gray-100 bg-white sticky top-0 z-40"
-        style={{ borderTopImage: "linear-gradient(90deg, #FF9933, #FFFFFF, #138808) 1" }}>
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-md bg-navy flex items-center justify-center text-white font-bold text-sm">RV</div>
-            <span className="text-lg font-bold text-navy">RailVinyas</span>
+    <div className="min-h-screen flex flex-col bg-slate-50/50">
+      {/* HEADER */}
+      <header className="sticky top-0 z-40 bg-white border-b border-gray-100 shadow-sm">
+        <div className="h-[3px] bg-gradient-to-r from-[#FF9933] via-white to-[#138808]" />
+
+        <div className="max-w-[1400px] mx-auto px-5 lg:px-8 h-[68px] flex items-center justify-between gap-6">
+          {/* BRAND */}
+          <div
+            className="flex items-center gap-3 shrink-0 cursor-pointer"
+            onClick={() => navigate("/dashboard")}
+          >
+            <div className="h-10 w-10 rounded-xl bg-navy text-white flex items-center justify-center font-extrabold shadow-sm">
+              RV
+            </div>
+
+            <div>
+              <div className="text-lg font-extrabold text-navy leading-none">
+                RailVinyas
+              </div>
+
+              <div className="text-[9px] uppercase tracking-[0.16em] font-semibold text-gray-400 mt-1">
+                AI Operations
+              </div>
+            </div>
           </div>
-          <nav className="hidden md:flex items-center gap-1">
-            <NavLink to="/dashboard" className={({isActive}) => `${navItem} ${isActive ? active : inactive}`}>Dashboard</NavLink>
+
+          {/* NAVIGATION */}
+          <nav className="hidden lg:flex items-center gap-1">
+            <NavLink
+              to="/dashboard"
+              className={({ isActive }) =>
+                `${navItem} ${isActive ? active : inactive}`
+              }
+            >
+              Command Center
+            </NavLink>
+
             {session?.role !== "Viewer" && (
-              <NavLink to="/new-request" className={({isActive}) => `${navItem} ${isActive ? active : inactive}`}>New Block Request</NavLink>
+              <NavLink
+                to="/new-request"
+                className={({ isActive }) =>
+                  `${navItem} ${isActive ? active : inactive}`
+                }
+              >
+                Block Planner
+              </NavLink>
             )}
-            <NavLink to="/section-traffic" className={({isActive}) => `${navItem} ${isActive ? active : inactive}`}>Section Traffic</NavLink>
+
+            <NavLink
+              to="/section-traffic"
+              className={({ isActive }) =>
+                `${navItem} ${isActive ? active : inactive}`
+              }
+            >
+              Traffic Intelligence
+            </NavLink>
+
             {session?.role !== "Viewer" && (
-              <NavLink to="/reports" className={({isActive}) => `${navItem} ${isActive ? active : inactive}`}>Reports</NavLink>
+              <NavLink
+                to="/reports"
+                className={({ isActive }) =>
+                  `${navItem} ${isActive ? active : inactive}`
+                }
+              >
+                Analytics
+              </NavLink>
             )}
+
             {session?.role === "Admin" && (
-              <NavLink to="/admin" className={({isActive}) => `${navItem} ${isActive ? active : inactive}`}>Admin Panel</NavLink>
+              <NavLink
+                to="/admin"
+                className={({ isActive }) =>
+                  `${navItem} ${isActive ? active : inactive}`
+                }
+              >
+                Administration
+              </NavLink>
             )}
           </nav>
-          <div className="flex items-center gap-3">
-            <div className="text-right hidden sm:block">
-              <div className="text-sm font-medium text-navy leading-tight">{session?.name}</div>
+
+          {/* USER AREA */}
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="hidden md:block text-right">
+              <div className="text-sm font-bold text-navy leading-tight">
+                {session?.name}
+              </div>
+
+              <div className="text-[10px] text-gray-400 mt-0.5">
+                Authorized user
+              </div>
             </div>
+
             <RoleBadge role={session?.role} />
-            <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-red-500 transition-colors" title="Log out">
+
+            <button
+              onClick={handleLogout}
+              className="h-9 w-9 rounded-lg border border-gray-200 text-gray-400 hover:text-red-600 hover:border-red-200 hover:bg-red-50 transition"
+              title="Log out"
+            >
               ⏻
             </button>
           </div>
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">{children}</main>
+      {/* MAIN */}
+      <main className="flex-1 w-full max-w-[1400px] mx-auto px-5 lg:px-8 py-7">
+        {children}
+      </main>
 
-      <footer className="border-t border-gray-100 bg-cardgray/50 py-4 mt-auto">
-        <p className="max-w-7xl mx-auto px-6 text-xs text-gray-500 text-center">
-          Prototype system — traffic data derived from real Indian Railways schedules; asset and
-          maintenance-history data is simulated for demonstration purposes. Not an official Indian Railways product.
-        </p>
+      {/* FOOTER */}
+      <footer className="border-t border-gray-100 bg-white mt-auto">
+        <div className="max-w-[1400px] mx-auto px-5 lg:px-8 py-4">
+          <p className="text-[10px] text-gray-400 text-center leading-5">
+            Prototype system — traffic data derived from Indian Railways
+            schedules; asset and maintenance-history data is simulated for
+            demonstration purposes. Not an official Indian Railways product.
+          </p>
+        </div>
       </footer>
     </div>
   );
