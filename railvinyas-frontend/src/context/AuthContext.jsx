@@ -88,15 +88,24 @@ export function AuthProvider({
 
 
   const value = useMemo(
-    () => ({
-      token,
-      role,
-      name,
-      isAuthenticated:
-        Boolean(token),
-      loginSuccess,
-      logout,
-    }),
+  () => ({
+    token,
+    role,
+    name,
+
+    session: token
+      ? {
+          token,
+          role,
+          name,
+        }
+      : null,
+
+    isAuthenticated: Boolean(token),
+
+    loginSuccess,
+    logout,
+  }),
     [
       token,
       role,
