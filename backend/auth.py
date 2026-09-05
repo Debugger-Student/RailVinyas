@@ -57,14 +57,39 @@ SEED_USERS = [
         "role": "Admin",
     },
 
-    # Add team members here if needed:
-    #
-    # {
-    #     "email": "member@gmail.com",
-    #     "name": "Team Member",
-    #     "password": "strong-password",
-    #     "role": "Section Controller",
-    # },
+    {
+            "email": "ansh.25007028@kiet.edu",
+            "name": "Ansh Insa",
+            "password": "ansh1234",
+            "role": "Admin",
+        },
+
+    {
+            "email": "shreya.25004307@kiet.edu",
+            "name": "Shreya Pandey",
+            "password": "shreya1234",
+            "role": "Admin",
+        },
+
+    {
+            "email": "vishal.25003296@kiet.edu",
+            "name": "Vishal Kumar",
+            "password": "vishal1234",
+            "role": "Admin",
+        },
+
+    {
+            "email": "vanshika.25004359@kiet.edu",
+            "name": "Vanshika Singhal",
+            "password": "vanshika1234",
+            "role": "Admin",
+        },
+    {
+            "email": "aman.25007177@kiet.edu",
+            "name": "Aman Gupta",
+            "password": "aman1234",
+            "role": "Admin",
+        },
 ]
 
 
