@@ -1,5 +1,40 @@
+// ============================================================
+// RailVinyas API Client
+// ============================================================
+
+// When frontend and backend are deployed together on Render,
+// use the same origin.
+//
+// Local:
+//     http://localhost:8000
+//
+// Production:
+//     https://railvinyas-api.onrender.com
+//
+// You can optionally override this with:
+//     VITE_API_BASE_URL
+//
 const API_BASE =
   import.meta.env.VITE_API_BASE_URL || "";
+
+
+// ============================================================
+// CUSTOM API ERROR
+// ============================================================
+
+export class ApiError extends Error {
+  constructor(
+    message,
+    status = 0,
+    data = null
+  ) {
+    super(message);
+
+    this.name = "ApiError";
+    this.status = status;
+    this.data = data;
+  }
+}
 
 
 // ============================================================
@@ -13,7 +48,17 @@ export function getDeviceId() {
     );
 
   if (!deviceId) {
-    deviceId = crypto.randomUUID();
+    if (
+      typeof crypto !== "undefined" &&
+      typeof crypto.randomUUID === "function"
+    ) {
+      deviceId = crypto.randomUUID();
+    } else {
+      deviceId =
+        `${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2)}`;
+    }
 
     localStorage.setItem(
       "railvinyas_device_id",
@@ -26,66 +71,120 @@ export function getDeviceId() {
 
 
 // ============================================================
-// API FETCH
+// TOKEN
+// ============================================================
+
+function getToken() {
+  return sessionStorage.getItem(
+    "railvinyas_token"
+  );
+}
+
+
+// ============================================================
+// API FETCH WRAPPER
 // ============================================================
 
 export async function apiFetch(
   path,
   options = {}
 ) {
-  const token =
-    sessionStorage.getItem(
-      "railvinyas_token"
-    );
+  const token = getToken();
 
   const headers = {
     ...(options.headers || {}),
   };
 
 
+  // ----------------------------------------------------------
   // JSON body
+  // ----------------------------------------------------------
+
+  let body = options.body;
+
   if (
-    options.body &&
-    typeof options.body !== "string"
+    body &&
+    typeof body !== "string" &&
+    !(body instanceof FormData)
   ) {
     headers["Content-Type"] =
       "application/json";
 
-    options = {
-      ...options,
-      body: JSON.stringify(
-        options.body
-      ),
-    };
+    body = JSON.stringify(body);
   }
 
 
-  // Authentication
+  // ----------------------------------------------------------
+  // Authorization
+  // ----------------------------------------------------------
+
   if (token) {
     headers["Authorization"] =
       `Bearer ${token}`;
   }
 
 
-  const response = await fetch(
-    `${API_BASE}${path}`,
-    {
-      ...options,
-      headers,
-    }
-  );
+  let response;
 
+
+  try {
+    response = await fetch(
+      `${API_BASE}${path}`,
+      {
+        ...options,
+        headers,
+        body,
+      }
+    );
+  } catch (error) {
+
+    throw new ApiError(
+      "Unable to connect to the RailVinyas server.",
+      0,
+      null
+    );
+  }
+
+
+  // ----------------------------------------------------------
+  // Parse response
+  // ----------------------------------------------------------
 
   let data = null;
 
+  const contentType =
+    response.headers.get(
+      "content-type"
+    );
+
+
   try {
-    data = await response.json();
+
+    if (
+      contentType &&
+      contentType.includes(
+        "application/json"
+      )
+    ) {
+      data = await response.json();
+    } else {
+      const text =
+        await response.text();
+
+      data = text
+        ? { message: text }
+        : null;
+    }
+
   } catch {
     data = null;
   }
 
 
-  // Session expired / invalid token
+  // ----------------------------------------------------------
+  // Unauthorized
+  // ----------------------------------------------------------
+
   if (response.status === 401) {
 
     sessionStorage.removeItem(
@@ -100,22 +199,44 @@ export async function apiFetch(
       "railvinyas_name"
     );
 
-    window.location.href =
-      "/login";
+    // Do not redirect if the user is already
+    // on a public authentication page.
+    const publicPages = [
+      "/login",
+      "/register",
+    ];
 
-    throw new Error(
+    if (
+      !publicPages.includes(
+        window.location.pathname
+      )
+    ) {
+      window.location.href =
+        "/login";
+    }
+
+    throw new ApiError(
       data?.detail ||
-      "Session expired. Please log in again."
+        data?.message ||
+        "Session expired. Please log in again.",
+      401,
+      data
     );
   }
 
 
+  // ----------------------------------------------------------
+  // Other HTTP errors
+  // ----------------------------------------------------------
+
   if (!response.ok) {
 
-    throw new Error(
+    throw new ApiError(
       data?.detail ||
-      data?.message ||
-      `Request failed (${response.status})`
+        data?.message ||
+        `Request failed with status ${response.status}`,
+      response.status,
+      data
     );
   }
 
@@ -125,7 +246,7 @@ export async function apiFetch(
 
 
 // ============================================================
-// AUTH
+// AUTHENTICATION
 // ============================================================
 
 export async function register(
@@ -185,29 +306,20 @@ export async function verifyOtp(
 }
 
 
+export async function getCurrentUser() {
+  return apiFetch(
+    "/api/auth/me"
+  );
+}
+
+
 // ============================================================
-// RAILWAY API
+// RAILWAY SECTIONS
 // ============================================================
 
 export async function getSections() {
   return apiFetch(
     "/api/sections"
-  );
-}
-
-
-export async function getStations(
-  query = ""
-) {
-  const params =
-    new URLSearchParams();
-
-  if (query) {
-    params.set("q", query);
-  }
-
-  return apiFetch(
-    `/api/stations?${params.toString()}`
   );
 }
 
@@ -228,6 +340,30 @@ export async function resolveSection(
 }
 
 
+// ============================================================
+// STATIONS
+// ============================================================
+
+export async function getStations(
+  query = "",
+  limit = 30
+) {
+  const params =
+    new URLSearchParams({
+      q: query,
+      limit: String(limit),
+    });
+
+  return apiFetch(
+    `/api/stations?${params.toString()}`
+  );
+}
+
+
+// ============================================================
+// AI RECOMMENDATION
+// ============================================================
+
 export async function getRecommendation(
   request
 ) {
@@ -239,6 +375,12 @@ export async function getRecommendation(
     }
   );
 }
+
+
+// Backward-compatible alias.
+// Some existing components may call this name.
+export const recommend =
+  getRecommendation;
 
 
 // ============================================================
@@ -286,7 +428,7 @@ export async function getReports() {
 
 
 // ============================================================
-// ASSETS
+// ASSET MANAGEMENT
 // ============================================================
 
 export async function getAssets() {
@@ -315,7 +457,7 @@ export async function updateAssetStatus(
 
 
 // ============================================================
-// ADMIN
+// ADMIN USERS
 // ============================================================
 
 export async function getAdminUsers() {
@@ -342,7 +484,7 @@ export async function updateUserRole(
 
 
 // ============================================================
-// BLOCK REQUESTS
+// BLOCK REQUEST LOG
 // ============================================================
 
 export async function getBlockLogs(
