@@ -38,6 +38,37 @@ export class ApiError extends Error {
 
 
 // ============================================================
+// ERROR MESSAGE HELPER
+// ============================================================
+
+function getErrorMessage(data, fallback) {
+  let message =
+    data?.detail ??
+    data?.message ??
+    fallback;
+
+  // Prevent "[object Object]"
+  if (typeof message !== "string") {
+    if (
+      message &&
+      typeof message === "object" &&
+      typeof message.message === "string"
+    ) {
+      message = message.message;
+    } else {
+      try {
+        message = JSON.stringify(message);
+      } catch {
+        message = fallback;
+      }
+    }
+  }
+
+  return message;
+}
+
+
+// ============================================================
 // DEVICE ID
 // ============================================================
 
@@ -127,6 +158,10 @@ export async function apiFetch(
   let response;
 
 
+  // ----------------------------------------------------------
+  // Network request
+  // ----------------------------------------------------------
+
   try {
     response = await fetch(
       `${API_BASE}${path}`,
@@ -137,7 +172,6 @@ export async function apiFetch(
       }
     );
   } catch (error) {
-
     throw new ApiError(
       "Unable to connect to the RailVinyas server.",
       0,
@@ -157,9 +191,7 @@ export async function apiFetch(
       "content-type"
     );
 
-
   try {
-
     if (
       contentType &&
       contentType.includes(
@@ -175,7 +207,6 @@ export async function apiFetch(
         ? { message: text }
         : null;
     }
-
   } catch {
     data = null;
   }
@@ -186,7 +217,6 @@ export async function apiFetch(
   // ----------------------------------------------------------
 
   if (response.status === 401) {
-
     sessionStorage.removeItem(
       "railvinyas_token"
     );
@@ -199,8 +229,6 @@ export async function apiFetch(
       "railvinyas_name"
     );
 
-    // Do not redirect if the user is already
-    // on a public authentication page.
     const publicPages = [
       "/login",
       "/register",
@@ -216,9 +244,10 @@ export async function apiFetch(
     }
 
     throw new ApiError(
-      data?.detail ||
-        data?.message ||
-        "Session expired. Please log in again.",
+      getErrorMessage(
+        data,
+        "Session expired. Please log in again."
+      ),
       401,
       data
     );
@@ -230,16 +259,20 @@ export async function apiFetch(
   // ----------------------------------------------------------
 
   if (!response.ok) {
-
     throw new ApiError(
-      data?.detail ||
-        data?.message ||
-        `Request failed with status ${response.status}`,
+      getErrorMessage(
+        data,
+        `Request failed with status ${response.status}`
+      ),
       response.status,
       data
     );
   }
 
+
+  // ----------------------------------------------------------
+  // Success
+  // ----------------------------------------------------------
 
   return data;
 }
@@ -378,7 +411,6 @@ export async function getRecommendation(
 
 
 // Backward-compatible alias.
-// Some existing components may call this name.
 export const recommend =
   getRecommendation;
 
