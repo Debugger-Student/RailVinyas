@@ -643,19 +643,36 @@ def score_hour(
     # Traffic
     # --------------------------------------------------------
 
-    try:
+    traffic_key = (section_id, hour)
 
-        trains_count, traffic_level = (
-            traffic_idx.loc[
-                (section_id, hour)
-            ]
-        )
+    if traffic_key in traffic_idx.index:
+        trains_count, traffic_level = traffic_idx.loc[traffic_key]
 
-    except KeyError:
+    else:
+        parts = section_id.split("-")
 
-        trains_count = 0.0
-        traffic_level = "LOW"
+        if len(parts) == 2:
+            reverse_section = f"{parts[1]}-{parts[0]}"
+            reverse_key = (reverse_section, hour)
 
+            if reverse_key in traffic_idx.index:
+                trains_count, traffic_level = traffic_idx.loc[reverse_key]
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"No traffic data available for "
+                        f"section '{section_id}' at hour {hour}"
+                    ),
+                )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No traffic data available for "
+                    f"section '{section_id}' at hour {hour}"
+                ),
+            )
 
     # --------------------------------------------------------
     # Number of matching assets in section
