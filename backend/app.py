@@ -611,6 +611,10 @@ def section_to_stations(section_id: str):
 # HOURLY SCORING FUNCTION
 # ============================================================
 
+# ============================================================
+# HOURLY SCORING FUNCTION
+# ============================================================
+
 def score_hour(
     section_id: str,
     hour: int,
@@ -646,43 +650,58 @@ def score_hour(
     traffic_key = (section_id, hour)
 
     if traffic_key in traffic_idx.index:
-        trains_count, traffic_level = traffic_idx.loc[traffic_key]
+        trains_count, traffic_level = traffic_idx.loc[
+            traffic_key
+        ]
 
     else:
+        # Try the reverse section direction.
+        #
+        # Example:
+        # GZB-NDLS → NDLS-GZB
+
         parts = section_id.split("-")
 
         if len(parts) == 2:
-            reverse_section = f"{parts[1]}-{parts[0]}"
-            reverse_key = (reverse_section, hour)
+
+            reverse_section = (
+                f"{parts[1]}-{parts[0]}"
+            )
+
+            reverse_key = (
+                reverse_section,
+                hour,
+            )
 
             if reverse_key in traffic_idx.index:
-                trains_count, traffic_level = traffic_idx.loc[reverse_key]
-            else:
-                raise HTTPException(
-                    status_code=404,
-                    detail=(
-                        f"No traffic data available for "
-                        f"section '{section_id}' at hour {hour}"
-                    ),
+
+                trains_count, traffic_level = (
+                    traffic_idx.loc[reverse_key]
                 )
+
+            else:
+                # Missing traffic data must not
+                # terminate the recommendation.
+                trains_count = 0.0
+                traffic_level = "LOW"
+
         else:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"No traffic data available for "
-                    f"section '{section_id}' at hour {hour}"
-                ),
-            )
+            # Invalid/unexpected section format.
+            # Use a safe fallback.
+            trains_count = 0.0
+            traffic_level = "LOW"
 
     # --------------------------------------------------------
     # Number of matching assets in section
     # --------------------------------------------------------
 
     assets_here = assets_count_idx.get(
-        (section_id, required_asset_type),
+        (
+            section_id,
+            required_asset_type,
+        ),
         0,
     )
-
 
     # --------------------------------------------------------
     # Daily asset availability
@@ -702,7 +721,6 @@ def score_hour(
         )
     ]
 
-
     if not day_records.empty:
 
         avail_pct = (
@@ -721,7 +739,6 @@ def score_hour(
 
         had_record = 0
 
-
     # --------------------------------------------------------
     # Historical overrun rate
     # --------------------------------------------------------
@@ -730,7 +747,6 @@ def score_hour(
         section_id,
         global_fallback_rate,
     )
-
 
     # --------------------------------------------------------
     # Date features
@@ -746,7 +762,6 @@ def score_hour(
             "Sunday",
         ]
     )
-
 
     # --------------------------------------------------------
     # Create ML feature row
@@ -774,7 +789,6 @@ def score_hour(
         ]
     )
 
-
     # --------------------------------------------------------
     # Encode categorical features
     # --------------------------------------------------------
@@ -790,7 +804,6 @@ def score_hour(
         )
     )
 
-
     # --------------------------------------------------------
     # ML prediction
     # --------------------------------------------------------
@@ -804,7 +817,6 @@ def score_hour(
         0.0,
     )
 
-
     # --------------------------------------------------------
     # Expected duration
     # --------------------------------------------------------
@@ -814,18 +826,22 @@ def score_hour(
         + predicted_overrun
     )
 
-
     # --------------------------------------------------------
     # Disruption score
     # --------------------------------------------------------
 
-    trains_count = float(trains_count)
+    trains_count = float(
+        trains_count
+    )
 
     disruption_score = (
         trains_count
         * expected_total_duration
     )
 
+    # --------------------------------------------------------
+    # Return hourly result
+    # --------------------------------------------------------
 
     return {
         "trains_count": round(
@@ -857,7 +873,6 @@ def score_hour(
             1,
         ),
     }
-
 
 # ============================================================
 # HEALTH CHECK
