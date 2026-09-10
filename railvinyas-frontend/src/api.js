@@ -2,7 +2,7 @@
 // Single shared fetch wrapper. Every page uses this instead of calling
 // fetch() directly, so auth headers and 401 handling live in ONE place.
 
-export const API_BASE = "http://localhost:8000";
+export const API_BASE = "https://railvinyas-api.onrender.com";
 
 // Set by AuthContext on login/logout so apiFetch always has the latest token
 // and a way to clear the session on 401 without a circular import.
@@ -67,3 +67,4 @@ export function getDeviceId() {
   }
   return id;
 }
+
