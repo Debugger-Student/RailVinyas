@@ -157,10 +157,7 @@ train_table = pd.read_csv(
 # failures after a Render cold-start, where a fresh container could resolve
 # a slightly different xgboost version than the one that pickled the model).
 # Native format is version-stable and immune to this problem.
-model = xgb.XGBRegressor()
-model.load_model(
-    MODELS_DIR / "overrun_model.json"
-)
+model = joblib.load(MODELS_DIR / "overrun_model.joblib")
 
 feature_columns = joblib.load(
     MODELS_DIR / "model_feature_columns.joblib"
