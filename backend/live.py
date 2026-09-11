@@ -4,29 +4,26 @@ backend/live.py — Live Section Panel data.
 TWO DISTINCT DATA SOURCES, kept deliberately separate and separately
 labeled -- do not conflate them:
 
-1. SCHEDULE-PROJECTED trains (default, always available, zero cost,
-   zero external dependency): for a given section_id, computes which
-   real trains -- per the real 02_train_timetable.csv -- are scheduled
-   to be somewhere between the two stations of that section RIGHT NOW,
-   and how far along (0.0-1.0) based on the current time of day.
-   This is REAL schedule data, run through a live clock -- not GPS.
-   Same honest caveat as everywhere else in this project: no run-day
-   mask exists in the source data, so every train is treated as if it
-   runs today.
+1. SCHEDULE-PROJECTED trains
+   - Uses the real 02_train_timetable.csv timetable data.
+   - Computes trains currently inside a section.
+   - Computes trains scheduled to enter a section within the next N hours.
+   - Uses current India time (IST).
+   - NOT GPS-confirmed.
+   - Source timetable has no run-day mask, so every train is treated
+     as running today.
 
-2. RAILRADAR GPS lookup (optional, third-party, rate-limited): a
-   single-train live-position lookup via railradar.in's public API.
-   This is genuinely live GPS-derived data, but it is NOT an official
-   Indian Railways feed -- RailRadar states this themselves. Requires
-   a RAILRADAR_API_KEY environment variable; if unset, the endpoint
-   returns a clear "not configured" response instead of failing oddly.
+2. RAILRADAR GPS lookup
+   - Optional third-party live GPS lookup for one train.
+   - Requires RAILRADAR_API_KEY.
+   - NOT an official Indian Railways feed.
 
 Router mounted at /api/live in app.py.
 """
+
 import os
-import time
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -34,159 +31,915 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.auth import get_current_user
 
-router = APIRouter(prefix="/api/live", tags=["Live Tracking"])
+
+# ============================================================
+# ROUTER
+# ============================================================
+
+router = APIRouter(
+    prefix="/api/live",
+    tags=["Live Tracking"],
+)
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 RAILRADAR_API_KEY = os.environ.get("RAILRADAR_API_KEY")
+
 RAILRADAR_BASE = "https://api.railradar.in/v1"
 
-# Populated by init_live_module() below, called once from app.py at startup
-# with the already-loaded timetable dataframe -- avoids reading the 186k-row
-# CSV a second time.
-_section_hops = {}   # section_id -> list of hop dicts (see build below)
-_traffic_idx = None  # set by app.py so this module can read signal aspect
+# Indian Standard Time
+IST = ZoneInfo("Asia/Kolkata")
 
 
-def init_live_module(timetable_df: pd.DataFrame, traffic_idx):
+# ============================================================
+# PRE-COMPUTED LIVE DATA
+# ============================================================
+
+# section_id -> list of train section hops
+#
+# Example:
+#
+# {
+#     "GZB-NDLS": [
+#         {
+#             "train_no": "12919",
+#             "train_name": "Malwa SF Express",
+#             "from_code": "GZB",
+#             "to_code": "NDLS",
+#             "from_name": "GHAZIABAD JN",
+#             "to_name": "NEW DELHI",
+#             "dep_time": "15:20:00",
+#             "arr_time": "15:55:00"
+#         }
+#     ]
+# }
+
+_section_hops = {}
+
+# Set by app.py.
+# Used to determine the signal-aspect proxy.
+_traffic_idx = None
+
+
+# ============================================================
+# INITIALIZATION
+# ============================================================
+
+def init_live_module(
+    timetable_df: pd.DataFrame,
+    traffic_idx,
+):
     """
-    Precompute, once at startup, every train's per-section hop with its
-    scheduled departure/arrival times -- so /api/live/section/.../projection
-    is a cheap dict lookup per request, not a 186k-row scan.
+    Precompute every train's section hop.
+
+    This avoids scanning the complete timetable dataframe
+    on every API request.
+
+    Called once from app.py during application startup.
     """
+
     global _traffic_idx
+
     _traffic_idx = traffic_idx
 
+    # Prevent duplicate entries if initialization happens again.
+    _section_hops.clear()
+
     tt = timetable_df.copy()
+
+    # Ensure sequence is numeric.
     tt["sequence"] = tt["sequence"].astype(int)
-    tt = tt.sort_values(["train_no", "sequence"])
 
-    tt["next_station"] = tt.groupby("train_no")["station_code"].shift(-1)
-    tt["next_station_name"] = tt.groupby("train_no")["station_name"].shift(-1)
-    tt["next_arrival"] = tt.groupby("train_no")["arrival_time"].shift(-1)
+    # Sort every train in station sequence order.
+    tt = tt.sort_values(
+        ["train_no", "sequence"]
+    )
 
-    hops = tt.dropna(subset=["next_station"]).copy()
+    # --------------------------------------------------------
+    # Create next station information.
+    # --------------------------------------------------------
+
+    tt["next_station"] = (
+        tt.groupby("train_no")["station_code"]
+        .shift(-1)
+    )
+
+    tt["next_station_name"] = (
+        tt.groupby("train_no")["station_name"]
+        .shift(-1)
+    )
+
+    tt["next_arrival"] = (
+        tt.groupby("train_no")["arrival_time"]
+        .shift(-1)
+    )
+
+    # Only rows having a next station represent a section hop.
+    hops = tt.dropna(
+        subset=["next_station"]
+    ).copy()
+
+    # --------------------------------------------------------
+    # Build canonical section ID.
+    #
+    # GZB -> NDLS
+    # NDLS -> GZB
+    #
+    # Both become:
+    #
+    # GZB-NDLS
+    # --------------------------------------------------------
 
     hops["section_id"] = hops.apply(
-        lambda r: "-".join(sorted([r["station_code"], r["next_station"]])), axis=1)
+        lambda r: "-".join(
+            sorted(
+                [
+                    str(r["station_code"]),
+                    str(r["next_station"]),
+                ]
+            )
+        ),
+        axis=1,
+    )
 
     count = 0
+
+    # --------------------------------------------------------
+    # Build fast lookup dictionary.
+    # --------------------------------------------------------
+
     for _, r in hops.iterrows():
+
         dep = str(r["departure_time"])
         arr = str(r["next_arrival"])
-        if dep in ("nan", "None") or arr in ("nan", "None"):
+
+        if dep in ("nan", "None"):
             continue
-        entry = dict(
-            train_no=str(r["train_no"]),
-            train_name=str(r["train_name"]),
-            from_code=r["station_code"], to_code=r["next_station"],
-            from_name=r["station_name"], to_name=r["next_station_name"],
-            dep_time=dep, arr_time=arr,
-        )
-        _section_hops.setdefault(r["section_id"], []).append(entry)
+
+        if arr in ("nan", "None"):
+            continue
+
+        entry = {
+            "train_no": str(r["train_no"]),
+            "train_name": str(r["train_name"]),
+
+            "from_code": str(r["station_code"]),
+            "to_code": str(r["next_station"]),
+
+            "from_name": str(r["station_name"]),
+            "to_name": str(r["next_station_name"]),
+
+            "dep_time": dep,
+            "arr_time": arr,
+        }
+
+        section_id = str(r["section_id"])
+
+        _section_hops.setdefault(
+            section_id,
+            []
+        ).append(entry)
+
         count += 1
 
-    print(f"[live] Indexed {count} train hops across {len(_section_hops)} sections for live projection")
+    print(
+        f"[live] Indexed {count} train hops "
+        f"across {len(_section_hops)} sections "
+        f"for live projection"
+    )
 
+
+# ============================================================
+# TIME HELPERS
+# ============================================================
 
 def _time_str_to_minutes(t: str):
-    """'HH:MM:SS' -> minutes since midnight. Returns None if unparseable."""
+    """
+    Convert:
+
+        HH:MM:SS
+
+    into minutes since midnight.
+
+    Returns None if the value cannot be parsed.
+    """
+
     try:
-        h, m, s = t.split(":")
-        return int(h) * 60 + int(m) + int(s) / 60
+        parts = str(t).split(":")
+
+        if len(parts) != 3:
+            return None
+
+        h, m, s = parts
+
+        return (
+            int(h) * 60
+            + int(m)
+            + int(s) / 60
+        )
+
     except Exception:
         return None
 
 
-def _signal_aspect(section_id: str, hour: int) -> str:
-    """Reuse the real traffic level for that section/hour as a genuine
-    signal-aspect proxy: LOW->green, MEDIUM->yellow, HIGH/VERY_HIGH->red.
-    This is a real derived value, not decorative."""
+def _canonical_section_id(section_id: str) -> str:
+    """
+    Convert a section ID into the canonical format.
+
+    Example:
+
+        NDLS-GZB -> GZB-NDLS
+
+    This matches the format used while building _section_hops.
+    """
+
+    section_id = str(section_id).strip().upper()
+
+    if "-" not in section_id:
+        return section_id
+
+    parts = section_id.split("-")
+
+    if len(parts) != 2:
+        return section_id
+
+    return "-".join(
+        sorted(parts)
+    )
+
+
+# ============================================================
+# SIGNAL ASPECT
+# ============================================================
+
+def _signal_aspect(
+    section_id: str,
+    hour: int,
+) -> str:
+    """
+    Reuse the real traffic level for that
+    section/hour as a signal-aspect proxy.
+
+    LOW        -> green
+    MEDIUM     -> yellow
+    HIGH       -> red
+    VERY_HIGH  -> red
+
+    This is a derived traffic value, not decorative UI data.
+    """
+
     try:
-        row = _traffic_idx.loc[(section_id, hour)]
+
+        row = _traffic_idx.loc[
+            (section_id, hour)
+        ]
+
         level = row["traffic_level"]
-    except KeyError:
+
+    except (KeyError, TypeError, AttributeError):
+
         level = "LOW"
-    return {"LOW": "green", "MEDIUM": "yellow", "HIGH": "red", "VERY_HIGH": "red"}.get(level, "green")
-
-
-@router.get("/section/{section_id}/projection")
-def section_projection(section_id: str, user=Depends(get_current_user)):
-    """Schedule-projected trains currently 'in' this section, based on the
-    real timetable and the current clock. No external dependency."""
-    now = datetime.now()
-    now_min = now.hour * 60 + now.minute + now.second / 60
-    canonical = "-".join(sorted(section_id.split("-"))) if "-" in section_id else section_id
-
-    hops = _section_hops.get(canonical, [])
-    canon_a, canon_b = (canonical.split("-") + [canonical])[:2]
-
-    active = []
-    for hop in hops:
-        dep_min = _time_str_to_minutes(hop["dep_time"])
-        arr_min = _time_str_to_minutes(hop["arr_time"])
-        if dep_min is None or arr_min is None:
-            continue
-        if arr_min <= dep_min:
-            arr_min += 24 * 60  # overnight hop
-
-        # Check current time against this hop's window, allowing for the
-        # possibility "now" is also past-midnight relative to a late-night departure
-        for offset in (0, -24 * 60, 24 * 60):
-            t = now_min + offset
-            if dep_min <= t <= arr_min:
-                raw_fraction = (t - dep_min) / max(arr_min - dep_min, 0.1)
-                forward = hop["from_code"] == canon_a
-                progress = raw_fraction if forward else (1 - raw_fraction)
-                eta_min = round(arr_min - t, 1)
-                active.append(dict(
-                    train_no=hop["train_no"], train_name=hop["train_name"],
-                    from_station=hop["from_name"], to_station=hop["to_name"],
-                    direction="forward" if forward else "reverse",
-                    progress=round(max(0.0, min(1.0, progress)), 3),
-                    eta_minutes=eta_min,
-                    source="schedule",
-                ))
-                break
 
     return {
+        "LOW": "green",
+        "MEDIUM": "yellow",
+        "HIGH": "red",
+        "VERY_HIGH": "red",
+    }.get(
+        level,
+        "green",
+    )
+
+
+# ============================================================
+# CURRENTLY ACTIVE TRAINS
+# ============================================================
+
+@router.get(
+    "/section/{section_id}/projection"
+)
+def section_projection(
+    section_id: str,
+    user=Depends(get_current_user),
+):
+    """
+    Return trains that are currently inside
+    the requested section.
+
+    DATA SOURCE:
+        Real timetable
+
+    MODE:
+        Schedule projection
+
+    NOT:
+        GPS tracking
+    """
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Always use Indian Standard Time.
+    # --------------------------------------------------------
+
+    now = datetime.now(IST)
+
+    now_min = (
+        now.hour * 60
+        + now.minute
+        + now.second / 60
+    )
+
+    canonical = _canonical_section_id(
+        section_id
+    )
+
+    hops = _section_hops.get(
+        canonical,
+        []
+    )
+
+    # --------------------------------------------------------
+    # Section direction endpoints.
+    # --------------------------------------------------------
+
+    parts = canonical.split("-")
+
+    if len(parts) == 2:
+
+        canon_a = parts[0]
+        canon_b = parts[1]
+
+    else:
+
+        canon_a = canonical
+        canon_b = canonical
+
+    active = []
+
+    # --------------------------------------------------------
+    # Check every train hop in this section.
+    # --------------------------------------------------------
+
+    for hop in hops:
+
+        dep_min = _time_str_to_minutes(
+            hop["dep_time"]
+        )
+
+        arr_min = _time_str_to_minutes(
+            hop["arr_time"]
+        )
+
+        if dep_min is None:
+            continue
+
+        if arr_min is None:
+            continue
+
+        # ----------------------------------------------------
+        # Overnight section movement.
+        #
+        # Example:
+        #
+        # 23:55 -> 00:20
+        #
+        # becomes:
+        #
+        # 23:55 -> 24:20
+        # ----------------------------------------------------
+
+        if arr_min <= dep_min:
+            arr_min += 24 * 60
+
+        # ----------------------------------------------------
+        # Check current time.
+        #
+        # Offset handling prevents midnight problems.
+        # ----------------------------------------------------
+
+        for offset in (
+            0,
+            -24 * 60,
+            24 * 60,
+        ):
+
+            t = now_min + offset
+
+            if dep_min <= t <= arr_min:
+
+                duration = max(
+                    arr_min - dep_min,
+                    0.1,
+                )
+
+                raw_fraction = (
+                    (t - dep_min)
+                    / duration
+                )
+
+                forward = (
+                    hop["from_code"]
+                    == canon_a
+                )
+
+                progress = (
+                    raw_fraction
+                    if forward
+                    else
+                    1 - raw_fraction
+                )
+
+                eta_min = round(
+                    arr_min - t,
+                    1,
+                )
+
+                active.append(
+                    {
+                        "train_no": hop["train_no"],
+                        "train_name": hop["train_name"],
+
+                        "from_station": hop["from_name"],
+                        "to_station": hop["to_name"],
+
+                        "direction": (
+                            "forward"
+                            if forward
+                            else "reverse"
+                        ),
+
+                        "progress": round(
+                            max(
+                                0.0,
+                                min(
+                                    1.0,
+                                    progress,
+                                ),
+                            ),
+                            3,
+                        ),
+
+                        "eta_minutes": eta_min,
+
+                        "source": "schedule",
+                    }
+                )
+
+                break
+
+    # --------------------------------------------------------
+    # Response.
+    # --------------------------------------------------------
+
+    return {
+        "success": True,
+
         "section_id": canonical,
-        "as_of": now.strftime("%H:%M:%S"),
-        "signal_aspect": _signal_aspect(canonical, now.hour),
+
+        "as_of": now.isoformat(),
+
+        "signal_aspect": _signal_aspect(
+            canonical,
+            now.hour,
+        ),
+
         "active_trains": active,
-        "note": "Schedule-projected from real timetable data against the current clock. "
-                "Not GPS-confirmed. Every train is treated as running today (source data "
-                "has no run-day mask).",
+
+        "source": "schedule",
+
+        "note": (
+            "Schedule-projected from real timetable data "
+            "against the current India time. "
+            "Not GPS-confirmed. Every train is treated "
+            "as running today because the source timetable "
+            "has no run-day mask."
+        ),
     }
 
 
-@router.get("/train/{train_number}")
-def live_train_lookup(train_number: str, user=Depends(get_current_user)):
-    """Optional real GPS lookup via RailRadar (third-party, NOT an official
-    Indian Railways feed -- disclose this in the UI when showing results)."""
+# ============================================================
+# UPCOMING TRAINS — NEXT N HOURS
+# ============================================================
+
+@router.get(
+    "/section/{section_id}/upcoming"
+)
+def upcoming_trains(
+    section_id: str,
+    hours: int = 3,
+    user=Depends(get_current_user),
+):
+    """
+    Return trains scheduled to ENTER the requested
+    section within the next `hours` hours.
+
+    Default:
+        3 hours
+
+    Maximum:
+        6 hours
+
+    DATA SOURCE:
+        Real timetable
+
+    MODE:
+        Schedule projection
+
+    NOT:
+        GPS-confirmed live movement.
+    """
+
+    # --------------------------------------------------------
+    # Protect the API from unreasonable windows.
+    #
+    # Minimum = 1 hour
+    # Maximum = 6 hours
+    # --------------------------------------------------------
+
+    hours = max(
+        1,
+        min(
+            hours,
+            6,
+        ),
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Render/Linux may use UTC.
+    #
+    # The railway dashboard needs Indian Standard Time.
+    # --------------------------------------------------------
+
+    now = datetime.now(IST)
+
+    now_min = (
+        now.hour * 60
+        + now.minute
+        + now.second / 60
+    )
+
+    canonical = _canonical_section_id(
+        section_id
+    )
+
+    hops = _section_hops.get(
+        canonical,
+        []
+    )
+
+    # --------------------------------------------------------
+    # Debug information.
+    #
+    # Useful in Render logs.
+    # --------------------------------------------------------
+
+    print(
+        f"[upcoming] "
+        f"section={canonical} "
+        f"hops={len(hops)} "
+        f"now={now.isoformat()} "
+        f"window={hours}h"
+    )
+
+    upcoming = []
+
+    # --------------------------------------------------------
+    # Examine every train using this section.
+    # --------------------------------------------------------
+
+    for hop in hops:
+
+        dep_min = _time_str_to_minutes(
+            hop["dep_time"]
+        )
+
+        arr_min = _time_str_to_minutes(
+            hop["arr_time"]
+        )
+
+        if dep_min is None:
+            continue
+
+        if arr_min is None:
+            continue
+
+        # ----------------------------------------------------
+        # Find the NEXT occurrence of the train departure.
+        #
+        # If today's scheduled departure already passed,
+        # consider the next day's occurrence.
+        # ----------------------------------------------------
+
+        adjusted_dep = dep_min
+
+        while adjusted_dep < now_min:
+
+            adjusted_dep += 24 * 60
+
+        # ----------------------------------------------------
+        # Adjust arrival for overnight movement.
+        #
+        # Example:
+        #
+        # departure = 23:55
+        # arrival   = 00:20
+        #
+        # arrival becomes 24:20.
+        # ----------------------------------------------------
+
+        adjusted_arr = arr_min
+
+        while adjusted_arr < adjusted_dep:
+
+            adjusted_arr += 24 * 60
+
+        # ----------------------------------------------------
+        # Time until train ENTERS the section.
+        # ----------------------------------------------------
+
+        minutes_until_departure = (
+            adjusted_dep
+            - now_min
+        )
+
+        # ----------------------------------------------------
+        # Ignore anything outside requested window.
+        # ----------------------------------------------------
+
+        if not (
+            0
+            <= minutes_until_departure
+            <= hours * 60
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # Determine direction.
+        # ----------------------------------------------------
+
+        forward = True
+
+        try:
+
+            canon_a, canon_b = (
+                canonical.split(
+                    "-",
+                    1,
+                )
+            )
+
+            forward = (
+                hop["from_code"]
+                == canon_a
+            )
+
+        except ValueError:
+
+            forward = True
+
+        # ----------------------------------------------------
+        # Section travel duration.
+        # ----------------------------------------------------
+
+        section_duration = (
+            adjusted_arr
+            - adjusted_dep
+        )
+
+        # ----------------------------------------------------
+        # Estimated time until train exits section.
+        # ----------------------------------------------------
+
+        minutes_until_arrival = (
+            minutes_until_departure
+            + section_duration
+        )
+
+        # ----------------------------------------------------
+        # Status.
+        # ----------------------------------------------------
+
+        status = (
+            "SOON"
+            if minutes_until_departure <= 30
+            else "UPCOMING"
+        )
+
+        # ----------------------------------------------------
+        # Add train.
+        # ----------------------------------------------------
+
+        upcoming.append(
+            {
+                "train_no": hop["train_no"],
+                "train_name": hop["train_name"],
+
+                "from_station": hop["from_name"],
+                "to_station": hop["to_name"],
+
+                "from_code": hop["from_code"],
+                "to_code": hop["to_code"],
+
+                "direction": (
+                    "forward"
+                    if forward
+                    else "reverse"
+                ),
+
+                "departure_time": hop["dep_time"],
+                "arrival_time": hop["arr_time"],
+
+                "minutes_until_departure": round(
+                    minutes_until_departure,
+                    1,
+                ),
+
+                "minutes_until_arrival": round(
+                    minutes_until_arrival,
+                    1,
+                ),
+
+                "status": status,
+
+                "source": "schedule",
+            }
+        )
+
+    # --------------------------------------------------------
+    # Nearest train first.
+    # --------------------------------------------------------
+
+    upcoming.sort(
+        key=lambda train:
+        train[
+            "minutes_until_departure"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Response.
+    # --------------------------------------------------------
+
+    return {
+        "success": True,
+
+        "section_id": canonical,
+
+        "as_of": now.isoformat(),
+
+        "window_hours": hours,
+
+        "window_minutes": hours * 60,
+
+        "trains": upcoming,
+
+        "count": len(upcoming),
+
+        "source": "schedule",
+
+        "note": (
+            "Schedule-projected from real timetable data "
+            "against the current India time. "
+            "Not GPS-confirmed. Every train is treated "
+            "as running today because the source timetable "
+            "has no run-day mask."
+        ),
+    }
+
+
+# ============================================================
+# OPTIONAL RAILRADAR GPS LOOKUP
+# ============================================================
+
+@router.get(
+    "/train/{train_number}"
+)
+def live_train_lookup(
+    train_number: str,
+    user=Depends(get_current_user),
+):
+    """
+    Optional real GPS lookup through RailRadar.
+
+    IMPORTANT:
+        RailRadar is a third-party service.
+        It is NOT an official Indian Railways feed.
+
+    Requires:
+        RAILRADAR_API_KEY
+    """
+
+    # --------------------------------------------------------
+    # API key check.
+    # --------------------------------------------------------
+
     if not RAILRADAR_API_KEY:
+
         raise HTTPException(
             status_code=503,
-            detail="Live GPS tracking isn't configured on this server. "
-                   "Set the RAILRADAR_API_KEY environment variable to enable it "
-                   "(https://railradar.in). Schedule-projected traffic still works without it.",
+            detail=(
+                "Live GPS tracking isn't configured on this "
+                "server. Set the RAILRADAR_API_KEY environment "
+                "variable to enable it "
+                "(https://railradar.in). "
+                "Schedule-projected traffic still works "
+                "without it."
+            ),
         )
+
+    # --------------------------------------------------------
+    # Request RailRadar.
+    # --------------------------------------------------------
 
     try:
+
         resp = requests.get(
-            f"{RAILRADAR_BASE}/trains/{train_number}/live",
-            headers={"Authorization": f"Bearer {RAILRADAR_API_KEY}"},
+            f"{RAILRADAR_BASE}/trains/"
+            f"{train_number}/live",
+
+            headers={
+                "Authorization":
+                f"Bearer {RAILRADAR_API_KEY}"
+            },
+
             timeout=5,
         )
+
     except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach RailRadar: {e}")
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Could not reach RailRadar: {e}"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # RailRadar response handling.
+    # --------------------------------------------------------
 
     if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail=f"Train '{train_number}' not found or not currently running")
-    if resp.status_code == 429:
-        raise HTTPException(status_code=429, detail="RailRadar free-tier quota exceeded for this month")
-    if not resp.ok:
-        raise HTTPException(status_code=502, detail=f"RailRadar returned an error (status {resp.status_code})")
 
-    data = resp.json()
-    data["source"] = "railradar"
-    data["disclosure"] = "Third-party data via RailRadar, not an official Indian Railways feed."
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Train '{train_number}' not found "
+                f"or not currently running"
+            ),
+        )
+
+    if resp.status_code == 429:
+
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "RailRadar free-tier quota exceeded "
+                "for this month"
+            ),
+        )
+
+    if not resp.ok:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "RailRadar returned an error "
+                f"(status {resp.status_code})"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Parse response.
+    # --------------------------------------------------------
+
+    try:
+
+        data = resp.json()
+
+    except ValueError:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "RailRadar returned invalid JSON"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Add source information.
+    # --------------------------------------------------------
+
+    if isinstance(data, dict):
+
+        data["source"] = "railradar"
+
+        data["disclosure"] = (
+            "Third-party data via RailRadar, "
+            "not an official Indian Railways feed."
+        )
+
     return data
