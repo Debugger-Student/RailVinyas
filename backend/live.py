@@ -1,28 +1,33 @@
 """
 backend/live.py — Live Section Panel data.
 
-TWO DISTINCT DATA SOURCES, kept deliberately separate and separately
-labeled -- do not conflate them:
+DATA SOURCES
+============
 
-1. SCHEDULE-PROJECTED trains
+1. SCHEDULE-PROJECTED DATA
    - Uses the real 02_train_timetable.csv timetable data.
-   - Computes trains currently inside a section.
-   - Computes trains scheduled to enter a section within the next N hours.
-   - Uses current India time (IST).
+   - Used by /section/{section_id}/projection.
    - NOT GPS-confirmed.
-   - Source timetable has no run-day mask, so every train is treated
-     as running today.
 
-2. RAILRADAR GPS lookup
-   - Optional third-party live GPS lookup for one train.
-   - Requires RAILRADAR_API_KEY.
+2. RAILRADAR LIVE DATA
+   - Used by /section/{section_id}/upcoming.
+   - Uses RailRadar live station board.
+   - Enriches candidate trains using RailRadar live train status.
+   - Provides live departure, arrival, ETA, delay, status,
+     platform, speed and current location where available.
+   - Third-party source.
    - NOT an official Indian Railways feed.
+
+3. RAILRADAR SINGLE TRAIN LOOKUP
+   - Used by /train/{train_number}.
+   - Direct live train lookup.
 
 Router mounted at /api/live in app.py.
 """
 
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -46,16 +51,34 @@ router = APIRouter(
 # CONFIGURATION
 # ============================================================
 
-RAILRADAR_API_KEY = os.environ.get("RAILRADAR_API_KEY")
+RAILRADAR_API_KEY = os.environ.get(
+    "RAILRADAR_API_KEY"
+)
 
-RAILRADAR_BASE = "https://api.railradar.in/v1"
+RAILRADAR_BASE = (
+    "https://api.railradar.in/v1"
+)
 
 # Indian Standard Time
-IST = ZoneInfo("Asia/Kolkata")
+IST = ZoneInfo(
+    "Asia/Kolkata"
+)
+
+# ------------------------------------------------------------
+# Short cache for individual live train lookups.
+#
+# This prevents the dashboard from consuming a large number
+# of RailRadar API calls when the frontend refreshes every
+# few seconds.
+# ------------------------------------------------------------
+
+LIVE_CACHE_TTL_SECONDS = 30
+
+_live_train_cache = {}
 
 
 # ============================================================
-# PRE-COMPUTED LIVE DATA
+# PRE-COMPUTED SCHEDULE DATA
 # ============================================================
 
 # section_id -> list of train section hops
@@ -80,7 +103,7 @@ IST = ZoneInfo("Asia/Kolkata")
 _section_hops = {}
 
 # Set by app.py.
-# Used to determine the signal-aspect proxy.
+# Used for signal-aspect proxy.
 _traffic_idx = None
 
 
@@ -95,70 +118,80 @@ def init_live_module(
     """
     Precompute every train's section hop.
 
-    This avoids scanning the complete timetable dataframe
-    on every API request.
+    This is used ONLY for schedule projection.
 
-    Called once from app.py during application startup.
+    RailRadar is NOT used here.
     """
 
     global _traffic_idx
 
     _traffic_idx = traffic_idx
 
-    # Prevent duplicate entries if initialization happens again.
+    # Prevent duplicate entries.
     _section_hops.clear()
 
     tt = timetable_df.copy()
 
     # Ensure sequence is numeric.
-    tt["sequence"] = tt["sequence"].astype(int)
+    tt["sequence"] = (
+        tt["sequence"]
+        .astype(int)
+    )
 
-    # Sort every train in station sequence order.
+    # Sort every train by station sequence.
     tt = tt.sort_values(
-        ["train_no", "sequence"]
+        [
+            "train_no",
+            "sequence",
+        ]
     )
 
     # --------------------------------------------------------
-    # Create next station information.
+    # Next station.
     # --------------------------------------------------------
 
     tt["next_station"] = (
-        tt.groupby("train_no")["station_code"]
-        .shift(-1)
+        tt.groupby("train_no")[
+            "station_code"
+        ].shift(-1)
     )
 
     tt["next_station_name"] = (
-        tt.groupby("train_no")["station_name"]
-        .shift(-1)
+        tt.groupby("train_no")[
+            "station_name"
+        ].shift(-1)
     )
 
     tt["next_arrival"] = (
-        tt.groupby("train_no")["arrival_time"]
-        .shift(-1)
+        tt.groupby("train_no")[
+            "arrival_time"
+        ].shift(-1)
     )
 
-    # Only rows having a next station represent a section hop.
+    # Only rows having a next station are section hops.
     hops = tt.dropna(
         subset=["next_station"]
     ).copy()
 
     # --------------------------------------------------------
-    # Build canonical section ID.
+    # Canonical section ID.
     #
     # GZB -> NDLS
     # NDLS -> GZB
     #
-    # Both become:
-    #
-    # GZB-NDLS
+    # both become GZB-NDLS
     # --------------------------------------------------------
 
     hops["section_id"] = hops.apply(
         lambda r: "-".join(
             sorted(
                 [
-                    str(r["station_code"]),
-                    str(r["next_station"]),
+                    str(
+                        r["station_code"]
+                    ),
+                    str(
+                        r["next_station"]
+                    ),
                 ]
             )
         ),
@@ -168,35 +201,65 @@ def init_live_module(
     count = 0
 
     # --------------------------------------------------------
-    # Build fast lookup dictionary.
+    # Build lookup.
     # --------------------------------------------------------
 
     for _, r in hops.iterrows():
 
-        dep = str(r["departure_time"])
-        arr = str(r["next_arrival"])
+        dep = str(
+            r["departure_time"]
+        )
 
-        if dep in ("nan", "None"):
+        arr = str(
+            r["next_arrival"]
+        )
+
+        if dep in (
+            "nan",
+            "None",
+        ):
             continue
 
-        if arr in ("nan", "None"):
+        if arr in (
+            "nan",
+            "None",
+        ):
             continue
 
         entry = {
-            "train_no": str(r["train_no"]),
-            "train_name": str(r["train_name"]),
 
-            "from_code": str(r["station_code"]),
-            "to_code": str(r["next_station"]),
+            "train_no": str(
+                r["train_no"]
+            ),
 
-            "from_name": str(r["station_name"]),
-            "to_name": str(r["next_station_name"]),
+            "train_name": str(
+                r["train_name"]
+            ),
+
+            "from_code": str(
+                r["station_code"]
+            ),
+
+            "to_code": str(
+                r["next_station"]
+            ),
+
+            "from_name": str(
+                r["station_name"]
+            ),
+
+            "to_name": str(
+                r["next_station_name"]
+            ),
 
             "dep_time": dep,
+
             "arr_time": arr,
         }
 
-        section_id = str(r["section_id"])
+        section_id = str(
+            r["section_id"]
+        )
 
         _section_hops.setdefault(
             section_id,
@@ -208,7 +271,8 @@ def init_live_module(
     print(
         f"[live] Indexed {count} train hops "
         f"across {len(_section_hops)} sections "
-        f"for live projection"
+        f"for schedule projection",
+        flush=True,
     )
 
 
@@ -216,18 +280,15 @@ def init_live_module(
 # TIME HELPERS
 # ============================================================
 
-def _time_str_to_minutes(t: str):
+def _time_str_to_minutes(
+    t: str,
+):
     """
-    Convert:
-
-        HH:MM:SS
-
-    into minutes since midnight.
-
-    Returns None if the value cannot be parsed.
+    Convert HH:MM:SS into minutes since midnight.
     """
 
     try:
+
         parts = str(t).split(":")
 
         if len(parts) != 3:
@@ -242,21 +303,28 @@ def _time_str_to_minutes(t: str):
         )
 
     except Exception:
+
         return None
 
 
-def _canonical_section_id(section_id: str) -> str:
+def _canonical_section_id(
+    section_id: str,
+) -> str:
     """
-    Convert a section ID into the canonical format.
+    Convert:
 
-    Example:
+        NDLS-GZB
 
-        NDLS-GZB -> GZB-NDLS
+    into:
 
-    This matches the format used while building _section_hops.
+        GZB-NDLS
     """
 
-    section_id = str(section_id).strip().upper()
+    section_id = (
+        str(section_id)
+        .strip()
+        .upper()
+    )
 
     if "-" not in section_id:
         return section_id
@@ -271,6 +339,92 @@ def _canonical_section_id(section_id: str) -> str:
     )
 
 
+def _parse_iso_datetime(
+    value,
+):
+    """
+    Parse RailRadar ISO timestamp.
+
+    Returns timezone-aware IST datetime.
+    """
+
+    if not value:
+        return None
+
+    try:
+
+        text = str(value)
+
+        dt = datetime.fromisoformat(
+            text.replace(
+                "Z",
+                "+00:00",
+            )
+        )
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(
+                tzinfo=IST
+            )
+
+        return dt.astimezone(
+            IST
+        )
+
+    except Exception:
+
+        return None
+
+
+def _format_time(
+    value,
+):
+    """
+    Convert ISO datetime into HH:MM.
+    """
+
+    dt = _parse_iso_datetime(
+        value
+    )
+
+    if not dt:
+        return "--"
+
+    return dt.strftime(
+        "%H:%M"
+    )
+
+
+def _minutes_from_now(
+    value,
+    now=None,
+):
+    """
+    Return minutes from now to an ISO timestamp.
+    """
+
+    dt = _parse_iso_datetime(
+        value
+    )
+
+    if not dt:
+        return None
+
+    if now is None:
+        now = datetime.now(
+            IST
+        )
+
+    return round(
+        (
+            dt - now
+        ).total_seconds()
+        / 60,
+        1,
+    )
+
+
 # ============================================================
 # SIGNAL ASPECT
 # ============================================================
@@ -280,26 +434,34 @@ def _signal_aspect(
     hour: int,
 ) -> str:
     """
-    Reuse the real traffic level for that
-    section/hour as a signal-aspect proxy.
+    Reuse traffic level as signal-aspect proxy.
 
     LOW        -> green
     MEDIUM     -> yellow
     HIGH       -> red
     VERY_HIGH  -> red
 
-    This is a derived traffic value, not decorative UI data.
+    This is a derived traffic value.
     """
 
     try:
 
         row = _traffic_idx.loc[
-            (section_id, hour)
+            (
+                section_id,
+                hour,
+            )
         ]
 
-        level = row["traffic_level"]
+        level = row[
+            "traffic_level"
+        ]
 
-    except (KeyError, TypeError, AttributeError):
+    except (
+        KeyError,
+        TypeError,
+        AttributeError,
+    ):
 
         level = "LOW"
 
@@ -315,7 +477,451 @@ def _signal_aspect(
 
 
 # ============================================================
-# CURRENTLY ACTIVE TRAINS
+# RAILRADAR HELPERS
+# ============================================================
+
+def _railradar_headers():
+    """
+    Authorization headers for RailRadar.
+    """
+
+    return {
+        "Authorization": (
+            f"Bearer {RAILRADAR_API_KEY}"
+        ),
+        "Accept": "application/json",
+    }
+
+
+def _railradar_error_detail(
+    response,
+):
+    """
+    Extract useful RailRadar error text.
+    """
+
+    try:
+
+        payload = response.json()
+
+        error = payload.get(
+            "error"
+        )
+
+        if isinstance(
+            error,
+            dict,
+        ):
+
+            return (
+                error.get(
+                    "message"
+                )
+                or str(error)
+            )
+
+        if error:
+            return str(error)
+
+    except Exception:
+
+        pass
+
+    return (
+        f"RailRadar returned HTTP "
+        f"{response.status_code}"
+    )
+
+
+# ============================================================
+# RAILRADAR — LIVE STATION BOARD
+# ============================================================
+
+def _railradar_station_live(
+    station_code: str,
+):
+    """
+    Fetch live station board.
+
+    RailRadar endpoint:
+
+        GET /v1/stations/{code}/live
+
+    includeIntermediate=true is important because
+    trains passing through the station should also be
+    considered.
+    """
+
+    if not RAILRADAR_API_KEY:
+
+        raise RuntimeError(
+            "RAILRADAR_API_KEY is not configured"
+        )
+
+    url = (
+        f"{RAILRADAR_BASE}"
+        f"/stations/{station_code}/live"
+    )
+
+    params = {
+        "hours": 4,
+        "includeIntermediate": "true",
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=_railradar_headers(),
+            params=params,
+            timeout=10,
+        )
+
+    except requests.RequestException as exc:
+
+        raise RuntimeError(
+            f"Could not reach RailRadar: {exc}"
+        )
+
+    if not response.ok:
+
+        raise RuntimeError(
+            _railradar_error_detail(
+                response
+            )
+        )
+
+    try:
+
+        payload = response.json()
+
+    except ValueError:
+
+        raise RuntimeError(
+            "RailRadar returned invalid JSON"
+        )
+
+    if not payload.get(
+        "success",
+        False,
+    ):
+
+        error = payload.get(
+            "error"
+        )
+
+        if isinstance(
+            error,
+            dict,
+        ):
+
+            error = error.get(
+                "message"
+            )
+
+        raise RuntimeError(
+            error
+            or "RailRadar station API failed"
+        )
+
+    return payload
+
+
+# ============================================================
+# RAILRADAR — LIVE TRAIN
+# ============================================================
+
+def _railradar_train_live(
+    train_number: str,
+):
+    """
+    Fetch authoritative live train status.
+
+    RailRadar endpoint:
+
+        GET /v1/trains/{number}/live
+
+    authoritative=true forces an upstream
+    live telemetry fetch.
+    """
+
+    if not RAILRADAR_API_KEY:
+
+        raise RuntimeError(
+            "RAILRADAR_API_KEY is not configured"
+        )
+
+    train_number = str(
+        train_number
+    ).strip()
+
+    now = time.monotonic()
+
+    # --------------------------------------------------------
+    # Short cache.
+    # --------------------------------------------------------
+
+    cached = _live_train_cache.get(
+        train_number
+    )
+
+    if cached:
+
+        cached_time, cached_data = cached
+
+        if (
+            now - cached_time
+            < LIVE_CACHE_TTL_SECONDS
+        ):
+
+            return cached_data
+
+    # --------------------------------------------------------
+    # RailRadar request.
+    # --------------------------------------------------------
+
+    url = (
+        f"{RAILRADAR_BASE}"
+        f"/trains/{train_number}/live"
+    )
+
+    params = {
+        "authoritative": "true",
+        "haltsOnly": "false",
+        "geometry": "false",
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=_railradar_headers(),
+            params=params,
+            timeout=10,
+        )
+
+    except requests.RequestException as exc:
+
+        print(
+            f"[RailRadar] train {train_number} "
+            f"request failed: {exc}",
+            flush=True,
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # 404
+    # --------------------------------------------------------
+
+    if response.status_code == 404:
+
+        print(
+            f"[RailRadar] train {train_number} "
+            f"not found",
+            flush=True,
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # 429
+    # --------------------------------------------------------
+
+    if response.status_code == 429:
+
+        print(
+            "[RailRadar] API quota/rate limit "
+            "reached",
+            flush=True,
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # Other HTTP errors.
+    # --------------------------------------------------------
+
+    if not response.ok:
+
+        print(
+            f"[RailRadar] train {train_number} "
+            f"HTTP {response.status_code}: "
+            f"{_railradar_error_detail(response)}",
+            flush=True,
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # JSON.
+    # --------------------------------------------------------
+
+    try:
+
+        payload = response.json()
+
+    except ValueError:
+
+        print(
+            f"[RailRadar] train {train_number} "
+            f"returned invalid JSON",
+            flush=True,
+        )
+
+        return None
+
+    if not payload.get(
+        "success",
+        False,
+    ):
+
+        return None
+
+    data = payload.get(
+        "data"
+    )
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+
+        return None
+
+    # --------------------------------------------------------
+    # Cache.
+    # --------------------------------------------------------
+
+    _live_train_cache[
+        train_number
+    ] = (
+        now,
+        data,
+    )
+
+    return data
+
+
+# ============================================================
+# ROUTE HELPERS
+# ============================================================
+
+def _find_route_stop(
+    route,
+    station_code,
+):
+    """
+    Find a station inside RailRadar live route.
+    """
+
+    if not isinstance(
+        route,
+        list,
+    ):
+        return None
+
+    station_code = str(
+        station_code
+    ).upper()
+
+    for stop in route:
+
+        if not isinstance(
+            stop,
+            dict,
+        ):
+            continue
+
+        code = str(
+            stop.get(
+                "stationCode"
+            )
+            or stop.get(
+                "code"
+            )
+            or ""
+        ).upper()
+
+        if code == station_code:
+
+            return stop
+
+    return None
+
+
+def _route_contains_section(
+    route,
+    from_code,
+    to_code,
+):
+    """
+    Check whether the RailRadar route actually
+    contains FROM -> TO in that order.
+
+    This prevents unrelated trains from appearing
+    in the section.
+    """
+
+    if not isinstance(
+        route,
+        list,
+    ):
+        return False
+
+    from_sequence = None
+    to_sequence = None
+
+    for stop in route:
+
+        if not isinstance(
+            stop,
+            dict,
+        ):
+            continue
+
+        code = str(
+            stop.get(
+                "stationCode"
+            )
+            or stop.get(
+                "code"
+            )
+            or ""
+        ).upper()
+
+        sequence = stop.get(
+            "sequence"
+        )
+
+        if code == from_code:
+
+            from_sequence = sequence
+
+        if code == to_code:
+
+            to_sequence = sequence
+
+    if (
+        from_sequence is None
+        or to_sequence is None
+    ):
+        return False
+
+    try:
+
+        return (
+            float(from_sequence)
+            < float(to_sequence)
+        )
+
+    except Exception:
+
+        return False
+
+
+# ============================================================
+# CURRENTLY ACTIVE TRAINS — SCHEDULE PROJECTION
 # ============================================================
 
 @router.get(
@@ -326,25 +932,16 @@ def section_projection(
     user=Depends(get_current_user),
 ):
     """
-    Return trains that are currently inside
-    the requested section.
+    Schedule-projected trains currently inside section.
 
-    DATA SOURCE:
-        Real timetable
+    This endpoint intentionally remains timetable-based.
 
-    MODE:
-        Schedule projection
-
-    NOT:
-        GPS tracking
+    NOT GPS-confirmed.
     """
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # Always use Indian Standard Time.
-    # --------------------------------------------------------
-
-    now = datetime.now(IST)
+    now = datetime.now(
+        IST
+    )
 
     now_min = (
         now.hour * 60
@@ -352,18 +949,16 @@ def section_projection(
         + now.second / 60
     )
 
-    canonical = _canonical_section_id(
-        section_id
+    canonical = (
+        _canonical_section_id(
+            section_id
+        )
     )
 
     hops = _section_hops.get(
         canonical,
         []
     )
-
-    # --------------------------------------------------------
-    # Section direction endpoints.
-    # --------------------------------------------------------
 
     parts = canonical.split("-")
 
@@ -379,46 +974,31 @@ def section_projection(
 
     active = []
 
-    # --------------------------------------------------------
-    # Check every train hop in this section.
-    # --------------------------------------------------------
-
     for hop in hops:
 
-        dep_min = _time_str_to_minutes(
-            hop["dep_time"]
+        dep_min = (
+            _time_str_to_minutes(
+                hop["dep_time"]
+            )
         )
 
-        arr_min = _time_str_to_minutes(
-            hop["arr_time"]
+        arr_min = (
+            _time_str_to_minutes(
+                hop["arr_time"]
+            )
         )
 
-        if dep_min is None:
+        if (
+            dep_min is None
+            or arr_min is None
+        ):
             continue
-
-        if arr_min is None:
-            continue
-
-        # ----------------------------------------------------
-        # Overnight section movement.
-        #
-        # Example:
-        #
-        # 23:55 -> 00:20
-        #
-        # becomes:
-        #
-        # 23:55 -> 24:20
-        # ----------------------------------------------------
 
         if arr_min <= dep_min:
-            arr_min += 24 * 60
 
-        # ----------------------------------------------------
-        # Check current time.
-        #
-        # Offset handling prevents midnight problems.
-        # ----------------------------------------------------
+            arr_min += (
+                24 * 60
+            )
 
         for offset in (
             0,
@@ -426,17 +1006,28 @@ def section_projection(
             24 * 60,
         ):
 
-            t = now_min + offset
+            t = (
+                now_min
+                + offset
+            )
 
-            if dep_min <= t <= arr_min:
+            if (
+                dep_min
+                <= t
+                <= arr_min
+            ):
 
                 duration = max(
-                    arr_min - dep_min,
+                    arr_min
+                    - dep_min,
                     0.1,
                 )
 
                 raw_fraction = (
-                    (t - dep_min)
+                    (
+                        t
+                        - dep_min
+                    )
                     / duration
                 )
 
@@ -449,7 +1040,8 @@ def section_projection(
                     raw_fraction
                     if forward
                     else
-                    1 - raw_fraction
+                    1
+                    - raw_fraction
                 )
 
                 eta_min = round(
@@ -459,69 +1051,78 @@ def section_projection(
 
                 active.append(
                     {
-                        "train_no": hop["train_no"],
-                        "train_name": hop["train_name"],
+                        "train_no":
+                            hop["train_no"],
 
-                        "from_station": hop["from_name"],
-                        "to_station": hop["to_name"],
+                        "train_name":
+                            hop["train_name"],
 
-                        "direction": (
-                            "forward"
-                            if forward
-                            else "reverse"
-                        ),
+                        "from_station":
+                            hop["from_name"],
 
-                        "progress": round(
-                            max(
-                                0.0,
-                                min(
-                                    1.0,
-                                    progress,
-                                ),
+                        "to_station":
+                            hop["to_name"],
+
+                        "direction":
+                            (
+                                "forward"
+                                if forward
+                                else "reverse"
                             ),
-                            3,
-                        ),
 
-                        "eta_minutes": eta_min,
+                        "progress":
+                            round(
+                                max(
+                                    0.0,
+                                    min(
+                                        1.0,
+                                        progress,
+                                    ),
+                                ),
+                                3,
+                            ),
 
-                        "source": "schedule",
+                        "eta_minutes":
+                            eta_min,
+
+                        "source":
+                            "schedule",
                     }
                 )
 
                 break
 
-    # --------------------------------------------------------
-    # Response.
-    # --------------------------------------------------------
-
     return {
         "success": True,
 
-        "section_id": canonical,
-
-        "as_of": now.isoformat(),
-
-        "signal_aspect": _signal_aspect(
+        "section_id":
             canonical,
-            now.hour,
-        ),
 
-        "active_trains": active,
+        "as_of":
+            now.isoformat(),
 
-        "source": "schedule",
+        "signal_aspect":
+            _signal_aspect(
+                canonical,
+                now.hour,
+            ),
+
+        "active_trains":
+            active,
+
+        "source":
+            "schedule",
 
         "note": (
-            "Schedule-projected from real timetable data "
-            "against the current India time. "
-            "Not GPS-confirmed. Every train is treated "
-            "as running today because the source timetable "
-            "has no run-day mask."
+            "Schedule-projected from real "
+            "timetable data against current "
+            "India time. Not GPS-confirmed."
         ),
     }
 
 
 # ============================================================
-# UPCOMING TRAINS — NEXT N HOURS
+# UPCOMING TRAINS — REAL RAILRADAR LIVE DATA
 # ============================================================
 
 @router.get(
@@ -533,251 +1134,843 @@ def upcoming_trains(
     user=Depends(get_current_user),
 ):
     """
-    Return trains scheduled to ENTER the requested
-    section within the next `hours` hours.
+    REAL RailRadar live section monitoring.
 
-    Default:
-        3 hours
+    Flow:
 
-    Maximum:
-        6 hours
+        RailRadar live station board
+                ↓
+        Candidate trains at FROM station
+                ↓
+        RailRadar live train status
+                ↓
+        Check FROM -> TO route
+                ↓
+        Extract actual/live timing
+                ↓
+        Calculate ETA
 
-    DATA SOURCE:
-        Real timetable
-
-    MODE:
-        Schedule projection
-
-    NOT:
-        GPS-confirmed live movement.
+    The local timetable is NOT the primary source
+    for this endpoint.
     """
 
     # --------------------------------------------------------
-    # Protect the API from unreasonable windows.
-    #
-    # Minimum = 1 hour
-    # Maximum = 6 hours
+    # API key.
     # --------------------------------------------------------
+
+    if not RAILRADAR_API_KEY:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "RAILRADAR_API_KEY is not configured "
+                "on the server."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Hours.
+    # --------------------------------------------------------
+
+    try:
+
+        hours = int(
+            hours
+        )
+
+    except Exception:
+
+        hours = 3
 
     hours = max(
         1,
         min(
             hours,
-            6,
+            3,
         ),
     )
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # Render/Linux may use UTC.
-    #
-    # The railway dashboard needs Indian Standard Time.
+    # Section.
     # --------------------------------------------------------
 
-    now = datetime.now(IST)
-
-    now_min = (
-        now.hour * 60
-        + now.minute
-        + now.second / 60
+    canonical = (
+        _canonical_section_id(
+            section_id
+        )
     )
 
-    canonical = _canonical_section_id(
-        section_id
+    parts = canonical.split(
+        "-"
     )
 
-    hops = _section_hops.get(
-        canonical,
-        []
-    )
+    if len(parts) != 2:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid section ID. "
+                "Expected FROM-TO, e.g. GZB-NDLS."
+            ),
+        )
+
+    from_code = parts[0]
+    to_code = parts[1]
 
     # --------------------------------------------------------
-    # Debug information.
-    #
-    # Useful in Render logs.
+    # Current IST time.
     # --------------------------------------------------------
+
+    now = datetime.now(
+        IST
+    )
+
+    window_end = (
+        now
+        + timedelta(
+            hours=hours
+        )
+    )
 
     print(
-        f"[upcoming] "
-        f"section={canonical} "
-        f"hops={len(hops)} "
+        f"[RailRadar] LIVE section "
+        f"{from_code}->{to_code} "
         f"now={now.isoformat()} "
-        f"window={hours}h"
+        f"window={hours}h",
+        flush=True,
     )
 
-    upcoming = []
+    # --------------------------------------------------------
+    # STEP 1
+    #
+    # Get live station board at FROM station.
+    #
+    # We request 4 hours because RailRadar allows
+    # station-live windows of 2/4/6/8 hours.
+    #
+    # We then filter locally to requested 1-3 hours.
+    # --------------------------------------------------------
+
+    try:
+
+        station_payload = (
+            _railradar_station_live(
+                from_code
+            )
+        )
+
+    except RuntimeError as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+    station_data = (
+        station_payload.get(
+            "data"
+        )
+        or {}
+    )
+
+    raw_trains = (
+        station_data.get(
+            "trains"
+        )
+        or []
+    )
+
+    print(
+        f"[RailRadar] {from_code} "
+        f"station board returned "
+        f"{len(raw_trains)} trains",
+        flush=True,
+    )
 
     # --------------------------------------------------------
-    # Examine every train using this section.
+    # STEP 2
+    #
+    # Process candidate trains.
     # --------------------------------------------------------
 
-    for hop in hops:
+    results = []
 
-        dep_min = _time_str_to_minutes(
-            hop["dep_time"]
-        )
+    seen_train_numbers = set()
 
-        arr_min = _time_str_to_minutes(
-            hop["arr_time"]
-        )
+    for item in raw_trains:
 
-        if dep_min is None:
-            continue
-
-        if arr_min is None:
-            continue
-
-        # ----------------------------------------------------
-        # Find the NEXT occurrence of the train departure.
-        #
-        # If today's scheduled departure already passed,
-        # consider the next day's occurrence.
-        # ----------------------------------------------------
-
-        adjusted_dep = dep_min
-
-        while adjusted_dep < now_min:
-
-            adjusted_dep += 24 * 60
-
-        # ----------------------------------------------------
-        # Adjust arrival for overnight movement.
-        #
-        # Example:
-        #
-        # departure = 23:55
-        # arrival   = 00:20
-        #
-        # arrival becomes 24:20.
-        # ----------------------------------------------------
-
-        adjusted_arr = arr_min
-
-        while adjusted_arr < adjusted_dep:
-
-            adjusted_arr += 24 * 60
-
-        # ----------------------------------------------------
-        # Time until train ENTERS the section.
-        # ----------------------------------------------------
-
-        minutes_until_departure = (
-            adjusted_dep
-            - now_min
-        )
-
-        # ----------------------------------------------------
-        # Ignore anything outside requested window.
-        # ----------------------------------------------------
-
-        if not (
-            0
-            <= minutes_until_departure
-            <= hours * 60
+        if not isinstance(
+            item,
+            dict,
         ):
             continue
 
+        train_info = (
+            item.get(
+                "train"
+            )
+            or {}
+        )
+
+        board_stop = (
+            item.get(
+                "stop"
+            )
+            or {}
+        )
+
+        board_live = (
+            item.get(
+                "live"
+            )
+            or {}
+        )
+
+        train_number = str(
+            train_info.get(
+                "number"
+            )
+            or ""
+        ).strip()
+
+        if not train_number:
+
+            continue
+
+        # Avoid duplicates.
+        if train_number in seen_train_numbers:
+
+            continue
+
+        seen_train_numbers.add(
+            train_number
+        )
+
+        train_name = (
+            train_info.get(
+                "name"
+            )
+            or "Unknown Train"
+        )
+
         # ----------------------------------------------------
-        # Determine direction.
+        # STEP 3
+        #
+        # Get actual live train details.
         # ----------------------------------------------------
 
-        forward = True
+        live_data = (
+            _railradar_train_live(
+                train_number
+            )
+        )
 
-        try:
+        if not live_data:
 
-            canon_a, canon_b = (
-                canonical.split(
-                    "-",
-                    1,
+            # If the individual live call fails,
+            # do NOT pretend timetable data is live.
+            #
+            # Use only the live station-board record
+            # if it contains enough information.
+
+            expected_departure = (
+                board_live.get(
+                    "expectedDepartureTime"
                 )
             )
 
-            forward = (
-                hop["from_code"]
-                == canon_a
+            minutes_until_departure = (
+                _minutes_from_now(
+                    expected_departure,
+                    now,
+                )
             )
 
-        except ValueError:
+            if (
+                minutes_until_departure
+                is None
+            ):
 
-            forward = True
+                continue
+
+            if not (
+                0
+                <= minutes_until_departure
+                <= hours * 60
+            ):
+
+                continue
+
+            results.append(
+                {
+                    "train_no":
+                        train_number,
+
+                    "train_name":
+                        train_name,
+
+                    "from_code":
+                        from_code,
+
+                    "to_code":
+                        to_code,
+
+                    "from_station":
+                        (
+                            station_data
+                            .get("station", {})
+                            .get("name")
+                            or from_code
+                        ),
+
+                    "to_station":
+                        to_code,
+
+                    "direction":
+                        "FORWARD",
+
+                    "departure_time":
+                        _format_time(
+                            expected_departure
+                        ),
+
+                    "arrival_time":
+                        "--",
+
+                    "scheduled_departure":
+                        board_stop.get(
+                            "departure"
+                        ),
+
+                    "scheduled_arrival":
+                        None,
+
+                    "minutes_until_departure":
+                        minutes_until_departure,
+
+                    "minutes_until_arrival":
+                        None,
+
+                    "eta_minutes":
+                        None,
+
+                    "delay_minutes":
+                        board_live.get(
+                            "delayMinutes"
+                        ),
+
+                    "status":
+                        (
+                            board_live.get(
+                                "type"
+                            )
+                            or "LIVE"
+                        ),
+
+                    "platform":
+                        board_live.get(
+                            "platform"
+                        ),
+
+                    "speed_kmh":
+                        None,
+
+                    "current_location":
+                        None,
+
+                    "last_updated_at":
+                        None,
+
+                    "source":
+                        "RailRadar LIVE",
+
+                    "is_live":
+                        True,
+                }
+            )
+
+            continue
 
         # ----------------------------------------------------
-        # Section travel duration.
+        # STEP 4
+        #
+        # Confirm train actually follows:
+        #
+        # FROM -> TO
+        #
+        # This is important because the station board
+        # can contain trains going in many directions.
         # ----------------------------------------------------
 
-        section_duration = (
-            adjusted_arr
-            - adjusted_dep
+        route = (
+            live_data.get(
+                "route"
+            )
+            or []
         )
 
+        if not _route_contains_section(
+            route,
+            from_code,
+            to_code,
+        ):
+
+            continue
+
         # ----------------------------------------------------
-        # Estimated time until train exits section.
+        # Locate FROM and TO stops.
         # ----------------------------------------------------
 
-        minutes_until_arrival = (
-            minutes_until_departure
-            + section_duration
+        from_stop = _find_route_stop(
+            route,
+            from_code,
         )
 
+        to_stop = _find_route_stop(
+            route,
+            to_code,
+        )
+
+        if not from_stop:
+
+            continue
+
+        if not to_stop:
+
+            continue
+
         # ----------------------------------------------------
-        # Status.
+        # Current live status.
         # ----------------------------------------------------
 
         status = (
-            "SOON"
-            if minutes_until_departure <= 30
-            else "UPCOMING"
+            live_data.get(
+                "status"
+            )
+            or "unknown"
+        )
+
+        delay_minutes = (
+            live_data.get(
+                "delayMinutes"
+            )
+        )
+
+        # Make delay numeric where possible.
+        try:
+
+            if delay_minutes is not None:
+
+                delay_minutes = int(
+                    delay_minutes
+                )
+
+        except Exception:
+
+            delay_minutes = 0
+
+        # ----------------------------------------------------
+        # Live expected departure.
+        #
+        # RailRadar station board provides
+        # expectedDepartureTime.
+        #
+        # Individual live route provides scheduled
+        # and actual timestamps.
+        # ----------------------------------------------------
+
+        expected_departure = (
+            board_live.get(
+                "expectedDepartureTime"
+            )
+        )
+
+        if not expected_departure:
+
+            expected_departure = (
+                from_stop.get(
+                    "actualDeparture"
+                )
+                or from_stop.get(
+                    "scheduledDeparture"
+                )
+            )
+
+        # ----------------------------------------------------
+        # Arrival at TO.
+        #
+        # Prefer actual arrival if already arrived.
+        # Otherwise calculate expected arrival from
+        # scheduled arrival + current train delay.
+        # ----------------------------------------------------
+
+        actual_arrival = (
+            to_stop.get(
+                "actualArrival"
+            )
+        )
+
+        scheduled_arrival = (
+            to_stop.get(
+                "scheduledArrival"
+            )
+        )
+
+        if actual_arrival:
+
+            expected_arrival = (
+                actual_arrival
+            )
+
+        elif scheduled_arrival:
+
+            arrival_dt = (
+                _parse_iso_datetime(
+                    scheduled_arrival
+                )
+            )
+
+            if arrival_dt:
+
+                expected_arrival = (
+                    (
+                        arrival_dt
+                        + timedelta(
+                            minutes=(
+                                delay_minutes
+                                or 0
+                            )
+                        )
+                    )
+                    .isoformat()
+                )
+
+            else:
+
+                expected_arrival = (
+                    scheduled_arrival
+                )
+
+        else:
+
+            expected_arrival = None
+
+        # ----------------------------------------------------
+        # Calculate minutes.
+        # ----------------------------------------------------
+
+        minutes_until_departure = (
+            _minutes_from_now(
+                expected_departure,
+                now,
+            )
+        )
+
+        minutes_until_arrival = (
+            _minutes_from_now(
+                expected_arrival,
+                now,
+            )
         )
 
         # ----------------------------------------------------
-        # Add train.
+        # If train has already passed FROM and is currently
+        # travelling towards TO, keep it in the live view
+        # only when it is still inside the section.
         # ----------------------------------------------------
 
-        upcoming.append(
+        current_location = (
+            live_data.get(
+                "currentLocation"
+            )
+            or {}
+        )
+
+        current_sequence = (
+            current_location.get(
+                "sequence"
+            )
+        )
+
+        from_sequence = (
+            from_stop.get(
+                "sequence"
+            )
+        )
+
+        to_sequence = (
+            to_stop.get(
+                "sequence"
+            )
+        )
+
+        is_inside_section = False
+
+        try:
+
+            if (
+                current_sequence
+                is not None
+                and from_sequence
+                is not None
+                and to_sequence
+                is not None
+            ):
+
+                is_inside_section = (
+                    float(
+                        from_sequence
+                    )
+                    <= float(
+                        current_sequence
+                    )
+                    <= float(
+                        to_sequence
+                    )
+                )
+
+        except Exception:
+
+            is_inside_section = False
+
+        # ----------------------------------------------------
+        # Future window filter.
+        #
+        # If train has not entered section yet:
+        # use departure.
+        #
+        # If already inside:
+        # keep it because it is REAL LIVE traffic.
+        # ----------------------------------------------------
+
+        if not is_inside_section:
+
+            if (
+                minutes_until_departure
+                is None
+            ):
+
+                continue
+
+            if not (
+                0
+                <= minutes_until_departure
+                <= hours * 60
+            ):
+
+                continue
+
+        # ----------------------------------------------------
+        # Platform.
+        # ----------------------------------------------------
+
+        platform = (
+            from_stop.get(
+                "platform"
+            )
+            or board_live.get(
+                "platform"
+            )
+        )
+
+        # ----------------------------------------------------
+        # Current speed.
+        # ----------------------------------------------------
+
+        speed_kmh = (
+            current_location.get(
+                "speedKmh"
+            )
+        )
+
+        # ----------------------------------------------------
+        # Current station/location.
+        # ----------------------------------------------------
+
+        current_station_code = (
+            current_location.get(
+                "stationCode"
+            )
+        )
+
+        current_status = (
+            current_location.get(
+                "status"
+            )
+        )
+
+        # ----------------------------------------------------
+        # Final result.
+        # ----------------------------------------------------
+
+        results.append(
             {
-                "train_no": hop["train_no"],
-                "train_name": hop["train_name"],
+                "train_no":
+                    train_number,
 
-                "from_station": hop["from_name"],
-                "to_station": hop["to_name"],
+                "train_name":
+                    (
+                        live_data.get(
+                            "trainName"
+                        )
+                        or train_name
+                    ),
 
-                "from_code": hop["from_code"],
-                "to_code": hop["to_code"],
+                "from_code":
+                    from_code,
 
-                "direction": (
-                    "forward"
-                    if forward
-                    else "reverse"
-                ),
+                "to_code":
+                    to_code,
 
-                "departure_time": hop["dep_time"],
-                "arrival_time": hop["arr_time"],
+                "from_station":
+                    (
+                        from_stop.get(
+                            "stationName"
+                        )
+                        or from_code
+                    ),
 
-                "minutes_until_departure": round(
+                "to_station":
+                    (
+                        to_stop.get(
+                            "stationName"
+                        )
+                        or to_code
+                    ),
+
+                "direction":
+                    "FORWARD",
+
+                # ------------------------------------------------
+                # Real / expected times
+                # ------------------------------------------------
+
+                "departure_time":
+                    _format_time(
+                        expected_departure
+                    ),
+
+                "arrival_time":
+                    _format_time(
+                        expected_arrival
+                    ),
+
+                "scheduled_departure":
+                    from_stop.get(
+                        "scheduledDeparture"
+                    ),
+
+                "scheduled_arrival":
+                    scheduled_arrival,
+
+                # ------------------------------------------------
+                # ETA
+                # ------------------------------------------------
+
+                "minutes_until_departure":
                     minutes_until_departure,
-                    1,
-                ),
 
-                "minutes_until_arrival": round(
+                "minutes_until_arrival":
                     minutes_until_arrival,
-                    1,
-                ),
 
-                "status": status,
+                "eta_minutes":
+                    (
+                        minutes_until_arrival
+                    ),
 
-                "source": "schedule",
+                # ------------------------------------------------
+                # Live status
+                # ------------------------------------------------
+
+                "status":
+                    status,
+
+                "live_status":
+                    current_status,
+
+                "delay_minutes":
+                    delay_minutes,
+
+                # ------------------------------------------------
+                # Railway information
+                # ------------------------------------------------
+
+                "platform":
+                    platform,
+
+                "speed_kmh":
+                    speed_kmh,
+
+                "current_location":
+                    {
+                        "station_code":
+                            current_station_code,
+
+                        "status":
+                            current_status,
+
+                        "segment_progress":
+                            current_location.get(
+                                "segmentProgress"
+                            ),
+
+                        "bearing_degrees":
+                            current_location.get(
+                                "bearingDegrees"
+                            ),
+
+                        "is_actual_position":
+                            current_location.get(
+                                "isActualPosition"
+                            ),
+                    },
+
+                "last_updated_at":
+                    live_data.get(
+                        "lastUpdatedAt"
+                    ),
+
+                # ------------------------------------------------
+                # Source
+                # ------------------------------------------------
+
+                "source":
+                    "RailRadar LIVE",
+
+                "is_live":
+                    bool(
+                        live_data.get(
+                            "isLive",
+                            True,
+                        )
+                    ),
             }
         )
 
     # --------------------------------------------------------
-    # Nearest train first.
+    # Sort.
+    #
+    # Live trains currently inside section first,
+    # then upcoming trains.
     # --------------------------------------------------------
 
-    upcoming.sort(
-        key=lambda train:
-        train[
-            "minutes_until_departure"
-        ]
+    results.sort(
+        key=lambda train: (
+            train.get(
+                "minutes_until_departure"
+            )
+            if train.get(
+                "minutes_until_departure"
+            ) is not None
+            else 999999
+        )
+    )
+
+    print(
+        f"[RailRadar] LIVE "
+        f"{from_code}->{to_code}: "
+        f"{len(results)} trains",
+        flush=True,
     )
 
     # --------------------------------------------------------
@@ -787,32 +1980,44 @@ def upcoming_trains(
     return {
         "success": True,
 
-        "section_id": canonical,
+        "section_id":
+            canonical,
 
-        "as_of": now.isoformat(),
+        "as_of":
+            now.isoformat(),
 
-        "window_hours": hours,
+        "window_hours":
+            hours,
 
-        "window_minutes": hours * 60,
+        "window_minutes":
+            hours * 60,
 
-        "trains": upcoming,
+        "trains":
+            results,
 
-        "count": len(upcoming),
+        "count":
+            len(results),
 
-        "source": "schedule",
+        "source":
+            "RailRadar LIVE",
+
+        "live":
+            True,
+
+        "last_updated_at":
+            now.isoformat(),
 
         "note": (
-            "Schedule-projected from real timetable data "
-            "against the current India time. "
-            "Not GPS-confirmed. Every train is treated "
-            "as running today because the source timetable "
-            "has no run-day mask."
+            "Live train movement fetched from "
+            "RailRadar. RailRadar is a third-party "
+            "data provider and is not an official "
+            "Indian Railways feed."
         ),
     }
 
 
 # ============================================================
-# OPTIONAL RAILRADAR GPS LOOKUP
+# OPTIONAL SINGLE TRAIN RAILRADAR GPS LOOKUP
 # ============================================================
 
 @router.get(
@@ -823,18 +2028,20 @@ def live_train_lookup(
     user=Depends(get_current_user),
 ):
     """
-    Optional real GPS lookup through RailRadar.
-
-    IMPORTANT:
-        RailRadar is a third-party service.
-        It is NOT an official Indian Railways feed.
+    Direct RailRadar live train lookup.
 
     Requires:
         RAILRADAR_API_KEY
+
+    Uses:
+        authoritative=true
+
+    This endpoint returns the raw RailRadar live
+    train information with source disclosure.
     """
 
     # --------------------------------------------------------
-    # API key check.
+    # API key.
     # --------------------------------------------------------
 
     if not RAILRADAR_API_KEY:
@@ -842,12 +2049,9 @@ def live_train_lookup(
         raise HTTPException(
             status_code=503,
             detail=(
-                "Live GPS tracking isn't configured on this "
-                "server. Set the RAILRADAR_API_KEY environment "
-                "variable to enable it "
-                "(https://railradar.in). "
-                "Schedule-projected traffic still works "
-                "without it."
+                "Live GPS tracking is not configured "
+                "on this server. Set RAILRADAR_API_KEY "
+                "to enable RailRadar tracking."
             ),
         )
 
@@ -855,31 +2059,38 @@ def live_train_lookup(
     # Request RailRadar.
     # --------------------------------------------------------
 
+    url = (
+        f"{RAILRADAR_BASE}"
+        f"/trains/{train_number}/live"
+    )
+
+    params = {
+        "authoritative": "true",
+        "haltsOnly": "false",
+        "geometry": "false",
+    }
+
     try:
 
         resp = requests.get(
-            f"{RAILRADAR_BASE}/trains/"
-            f"{train_number}/live",
-
-            headers={
-                "Authorization":
-                f"Bearer {RAILRADAR_API_KEY}"
-            },
-
-            timeout=5,
+            url,
+            headers=_railradar_headers(),
+            params=params,
+            timeout=10,
         )
 
-    except requests.RequestException as e:
+    except requests.RequestException as exc:
 
         raise HTTPException(
             status_code=502,
             detail=(
-                f"Could not reach RailRadar: {e}"
+                f"Could not reach RailRadar: "
+                f"{exc}"
             ),
         )
 
     # --------------------------------------------------------
-    # RailRadar response handling.
+    # Response handling.
     # --------------------------------------------------------
 
     if resp.status_code == 404:
@@ -887,8 +2098,19 @@ def live_train_lookup(
         raise HTTPException(
             status_code=404,
             detail=(
-                f"Train '{train_number}' not found "
-                f"or not currently running"
+                f"Train '{train_number}' "
+                f"not found or not currently "
+                f"available from RailRadar."
+            ),
+        )
+
+    if resp.status_code == 401:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "RailRadar rejected the API key. "
+                "Check RAILRADAR_API_KEY on Render."
             ),
         )
 
@@ -897,8 +2119,18 @@ def live_train_lookup(
         raise HTTPException(
             status_code=429,
             detail=(
-                "RailRadar free-tier quota exceeded "
-                "for this month"
+                "RailRadar API quota/rate limit "
+                "has been reached."
+            ),
+        )
+
+    if resp.status_code == 503:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "RailRadar upstream live telemetry "
+                "is temporarily unavailable."
             ),
         )
 
@@ -908,12 +2140,12 @@ def live_train_lookup(
             status_code=502,
             detail=(
                 "RailRadar returned an error "
-                f"(status {resp.status_code})"
+                f"(HTTP {resp.status_code})."
             ),
         )
 
     # --------------------------------------------------------
-    # Parse response.
+    # Parse JSON.
     # --------------------------------------------------------
 
     try:
@@ -925,20 +2157,54 @@ def live_train_lookup(
         raise HTTPException(
             status_code=502,
             detail=(
-                "RailRadar returned invalid JSON"
+                "RailRadar returned invalid JSON."
             ),
         )
 
     # --------------------------------------------------------
-    # Add source information.
+    # RailRadar failure envelope.
     # --------------------------------------------------------
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict,
+    ):
 
-        data["source"] = "railradar"
+        if data.get(
+            "success"
+        ) is False:
+
+            error = data.get(
+                "error"
+            )
+
+            if isinstance(
+                error,
+                dict,
+            ):
+
+                error = error.get(
+                    "message"
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    error
+                    or "RailRadar request failed."
+                ),
+            )
+
+        # ----------------------------------------------------
+        # Source disclosure.
+        # ----------------------------------------------------
+
+        data["source"] = (
+            "railradar"
+        )
 
         data["disclosure"] = (
-            "Third-party data via RailRadar, "
+            "Third-party live data via RailRadar, "
             "not an official Indian Railways feed."
         )
 
