@@ -85,7 +85,7 @@ IST = ZoneInfo("Asia/Kolkata")
 #
 # This prevents the same train from being requested repeatedly
 # within a short period.
-LIVE_CACHE_TTL_SECONDS = 60
+LIVE_CACHE_TTL_SECONDS = 30
 
 
 # train_number -> {
