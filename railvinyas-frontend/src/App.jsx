@@ -10,12 +10,14 @@ import NewBlockRequest from "./pages/NewBlockRequest";
 import SectionTraffic from "./pages/SectionTraffic";
 import Reports from "./pages/Reports";
 import AdminPanel from "./pages/AdminPanel";
+import LiveTrainAvailability from "./pages/LiveTrainAvailability";
 
 function AppRoutes() {
   const { isAuthenticated } = useAuth();
 
   return (
     <Routes>
+
       <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" /> : <Login />} />
       <Route path="/register" element={isAuthenticated ? <Navigate to="/dashboard" /> : <Register />} />
 
@@ -25,6 +27,14 @@ function AppRoutes() {
       <Route path="/new-request" element={
         <ProtectedRoute roles={["Admin", "Section Controller"]}><Layout><NewBlockRequest /></Layout></ProtectedRoute>
       } />
+      <Route path="/live-trains" element={
+        <ProtectedRoute roles={["Admin", "Section Controller"]}>
+      <Layout>
+        <LiveTrainAvailability />
+      </Layout>
+        </ProtectedRoute>
+      }
+      />
       <Route path="/section-traffic" element={
         <ProtectedRoute><Layout><SectionTraffic /></Layout></ProtectedRoute>
       } />

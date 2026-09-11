@@ -2,18 +2,22 @@
 //
 // Control-room-style schematic of a railway section.
 //
-// Data sources:
+// Data source:
 //   - Schedule-projected trains: calculated from timetable data.
-//   - GPS Live train: third-party RailRadar lookup.
 //
 // IMPORTANT:
 // This component is rendered inside NewBlockRequest's main <form>.
-// Therefore, the GPS tracking UI MUST NOT contain another <form>.
-// The GPS button uses type="button" to prevent submitting the
-// outer New Block Request form.
+// Therefore, buttons in this component use type="button"
+// so they do not submit the outer New Block Request form.
+//
+// GPS Live:
+//   Clicking GPS Live opens the dedicated Live Train Availability
+//   dashboard at /live-trains.
+//
 
 import { useEffect, useRef, useState } from "react";
-import { apiFetch, ApiError } from "../api";
+import { useNavigate } from "react-router-dom";
+import { apiFetch } from "../api";
 
 const SIGNAL_COLORS = {
   green: "#22C55E",
@@ -141,13 +145,10 @@ export default function LiveSectionPanel({
   fromName,
   toName,
 }) {
+  const navigate = useNavigate();
+
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
-
-  const [gpsQuery, setGpsQuery] = useState("");
-  const [gpsResult, setGpsResult] = useState(null);
-  const [gpsError, setGpsError] = useState("");
-  const [gpsLoading, setGpsLoading] = useState(false);
 
   const pollRef = useRef(null);
 
@@ -191,44 +192,25 @@ export default function LiveSectionPanel({
   }, [sectionId]);
 
   // ---------------------------------------------------------------
-  // GPS / RailRadar lookup
+  // Open dedicated Live Train Availability dashboard
   // ---------------------------------------------------------------
 
-  const trackLive = async (event) => {
-    // Safety: prevents any accidental outer-form submission.
-    event?.preventDefault();
+  const openLiveTrains = () => {
+    const params = new URLSearchParams();
 
-    setGpsError("");
-    setGpsResult(null);
-
-    const trainNumber = gpsQuery.trim();
-
-    if (!trainNumber) {
-      setGpsError(
-        "Enter a train number first."
-      );
-      return;
+    if (sectionId) {
+      params.set("section", sectionId);
     }
 
-    setGpsLoading(true);
-
-    try {
-      const response = await apiFetch(
-        `/api/live/train/${encodeURIComponent(
-          trainNumber
-        )}`
-      );
-
-      setGpsResult(response);
-    } catch (err) {
-      setGpsError(
-        err instanceof ApiError
-          ? err.message
-          : "GPS train lookup failed."
-      );
-    } finally {
-      setGpsLoading(false);
+    if (fromName) {
+      params.set("from", fromName);
     }
+
+    if (toName) {
+      params.set("to", toName);
+    }
+
+    navigate(`/live-trains?${params.toString()}`);
   };
 
   // ---------------------------------------------------------------
@@ -244,29 +226,6 @@ export default function LiveSectionPanel({
 
   const trains =
     data?.active_trains || [];
-
-  // ---------------------------------------------------------------
-  // GPS response
-  //
-  // Current backend response structure:
-  //
-  // {
-  //   success: true,
-  //   data: {
-  //     trainNumber: "12919",
-  //     trainName: "Malwa SF Express",
-  //     startDate: "...",
-  //     lastUpdatedAt: "...",
-  //     status: "running..."
-  //   }
-  // }
-  // ---------------------------------------------------------------
-
-  const gpsData =
-    gpsResult?.data || null;
-
-  const gpsSuccess =
-    gpsResult?.success === true;
 
   return (
     <div className="rounded-2xl bg-navy overflow-hidden relative shadow-lg border border-white/5">
@@ -403,9 +362,7 @@ export default function LiveSectionPanel({
 
           {trains.map((train, index) => (
             <TrainIcon
-              key={
-                `${train.train_no}-${index}`
-              }
+              key={`${train.train_no}-${index}`}
               x={
                 TRACK_X0 +
                 train.progress *
@@ -418,34 +375,6 @@ export default function LiveSectionPanel({
               label={`${train.train_no} ${train.train_name} · ${train.direction} · ETA ${train.eta_minutes}m (schedule-projected)`}
             />
           ))}
-
-          {/* =====================================================
-              GPS LIVE TRAIN
-
-              The API response has the train information under
-              gpsResult.data.
-
-              We only show the GPS train marker after a successful
-              lookup.
-              ===================================================== */}
-
-          {gpsSuccess && gpsData && (
-            <TrainIcon
-              x={
-                TRACK_X0 +
-                (TRACK_X1 -
-                  TRACK_X0) /
-                  2
-              }
-              y={TRACK_Y - 24}
-              color="#F59E0B"
-              live
-              label={`GPS live: ${
-                gpsData.trainNumber ||
-                gpsQuery
-              } — third-party (RailRadar)`}
-            />
-          )}
 
         </svg>
       </div>
@@ -465,7 +394,7 @@ export default function LiveSectionPanel({
 
           <span className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-amber-400" />
-            GPS live (RailRadar)
+            Live monitoring
           </span>
 
         </div>
@@ -491,140 +420,41 @@ export default function LiveSectionPanel({
       )}
 
       {/* =========================================================
-          GPS TRACKING PANEL
+          LIVE TRAIN AVAILABILITY
           
-          IMPORTANT:
-          NO <form> HERE.
-
-          This component is inside NewBlockRequest's outer form.
-          Using another <form> would create invalid nested forms
-          and cause the browser to navigate to:
-
-              /new-request?
-
-          The button is explicitly type="button".
+          GPS Live now opens the dedicated dashboard page.
+          
+          No <form> here because this component is already
+          inside NewBlockRequest's outer <form>.
           ========================================================= */}
 
       <div className="border-t border-white/10 px-6 py-4">
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
 
-          <input
-            type="text"
-            value={gpsQuery}
-            onChange={(event) =>
-              setGpsQuery(
-                event.target.value
-              )
-            }
-            onKeyDown={(event) => {
-              // Allow Enter to trigger GPS lookup
-              // without submitting the outer form.
-              if (
-                event.key === "Enter"
-              ) {
-                event.preventDefault();
-                trackLive(event);
-              }
-            }}
-            placeholder="Track a specific train live (e.g. 12919) — optional"
-            className="flex-1 bg-white/10 border border-white/10 rounded-md px-3 py-1.5 text-xs text-white placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-sky/50"
-          />
+          <div>
+            <div className="text-xs font-semibold text-white">
+              Live Train Availability
+            </div>
+
+            <div className="text-[10px] text-white/40 mt-1">
+              View all upcoming trains scheduled
+              within the next 3 hours.
+            </div>
+          </div>
 
           <button
             type="button"
-            onClick={trackLive}
-            disabled={gpsLoading}
-            className="text-xs font-semibold bg-amber-400/90 text-navy px-3 py-1.5 rounded-md hover:bg-amber-400 transition disabled:opacity-50"
+            onClick={openLiveTrains}
+            className="text-xs font-bold bg-amber-400 text-navy px-4 py-2 rounded-lg hover:bg-amber-300 transition"
           >
-            {gpsLoading
-              ? "..."
-              : "GPS Track"}
+            GPS Live →
           </button>
 
         </div>
 
-        {/* =======================================================
-            GPS ERROR
-            ======================================================= */}
-
-        {gpsError && (
-          <div className="mt-3 rounded-lg bg-red-400/10 border border-red-400/20 px-3 py-2">
-            <p className="text-[11px] text-red-300">
-              {gpsError}
-            </p>
-          </div>
-        )}
-
-        {/* =======================================================
-            GPS SUCCESS RESULT
-            ======================================================= */}
-
-        {gpsSuccess && gpsData && (
-          <div className="mt-3 rounded-lg bg-amber-400/10 border border-amber-400/20 px-3 py-3">
-
-            {/* Title */}
-            <div className="flex items-center justify-between">
-
-              <div className="font-semibold text-amber-300 text-xs">
-                GPS LIVE
-              </div>
-
-              <div className="flex items-center gap-1.5 text-[10px] text-amber-300/70">
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                RailRadar
-              </div>
-
-            </div>
-
-            {/* Train number + name */}
-            <div className="mt-1 text-xs text-white font-semibold">
-              Train:{" "}
-              {gpsData.trainNumber ||
-                gpsQuery}
-
-              {gpsData.trainName
-                ? ` — ${gpsData.trainName}`
-                : ""}
-            </div>
-
-            {/* Status */}
-            {gpsData.status && (
-              <div className="mt-1 text-[11px] text-white/70">
-                Status:{" "}
-                <span className="text-amber-200">
-                  {gpsData.status}
-                </span>
-              </div>
-            )}
-
-            {/* Start date */}
-            {gpsData.startDate && (
-              <div className="mt-1 text-[11px] text-white/60">
-                Journey date:{" "}
-                {gpsData.startDate}
-              </div>
-            )}
-
-            {/* Last updated */}
-            {gpsData.lastUpdatedAt && (
-              <div className="mt-1 text-[11px] text-white/60">
-                Last updated:{" "}
-                {gpsData.lastUpdatedAt}
-              </div>
-            )}
-
-            {/* Source disclosure */}
-            <div className="mt-2 text-[10px] text-amber-300/70">
-              Third-party data via RailRadar,
-              not an official Indian Railways
-              feed.
-            </div>
-
-          </div>
-        )}
-
       </div>
+
     </div>
   );
 }
