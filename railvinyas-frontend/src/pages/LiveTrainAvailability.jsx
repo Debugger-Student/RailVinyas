@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch, ApiError } from "../api";
 
-const REFRESH_MS = 30000;
+const REFRESH_MS = 60000;
 
 function formatTime(value) {
   if (!value) return "--";
