@@ -31,13 +31,22 @@ DB_PATH = (
     / "railvinyas.db"
 )
 
+# .strip() guards against a trailing newline/space if the value was
+# pasted with one. .replace(" ", "") on the app password specifically
+# guards against the most common real-world mistake: Google *displays*
+# an App Password chunked with spaces ("xxxx xxxx xxxx xxxx") for
+# readability, but the actual credential has none -- pasting it with
+# those spaces still in place makes smtplib.login() fail silently
+# (caught by the except below, logged, but the real cause is easy to
+# miss). This was very likely why real Gmail delivery wasn't working
+# even with both variables set.
 GMAIL_ADDRESS = os.environ.get(
-    "GMAIL_ADDRESS"
-)
+    "GMAIL_ADDRESS", ""
+).strip()
 
 GMAIL_APP_PASSWORD = os.environ.get(
-    "GMAIL_APP_PASSWORD"
-)
+    "GMAIL_APP_PASSWORD", ""
+).strip().replace(" ", "")
 
 router = APIRouter(
     prefix="/api/auth",
