@@ -99,6 +99,12 @@ SEED_USERS = [
             "password": "aman1234",
             "role": "Admin",
         },
+    {
+    "email": "aarzu.25007001@kiet.edu",
+    "name": "Aarzu Bhatt",
+    "password": "aarzu1234",
+    "role": "Viewer",
+        },
 ]
 
 
@@ -179,8 +185,8 @@ def init_db():
         ).fetchall()
     ]
 
-    if "is_seeded" not in columns:
 
+    if "is_seeded" not in columns:
         conn.execute(
             """
             ALTER TABLE users
@@ -275,7 +281,7 @@ def send_otp_email(
         flush=True,
     )
 
-   
+
 
     # Development/demo mode.
     if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
