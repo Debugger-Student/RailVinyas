@@ -54,9 +54,6 @@ router = APIRouter(
 )
 
 
-# ============================================================
-# TEAM / SEEDED ACCOUNTS
-# ============================================================
 
 SEED_USERS = [
     {
@@ -114,10 +111,6 @@ ALLOWED_ROLES = {
     "Viewer",
 }
 
-
-# ============================================================
-# DATABASE
-# ============================================================
 
 def get_db():
     conn = sqlite3.connect(
@@ -248,18 +241,23 @@ def init_db():
 
             conn.commit()
 
-        elif not existing["is_seeded"]:
-
+        else:
+            # Keep configured seed-account name/role in sync without
+            # overwriting the account's existing password.
             conn.execute(
                 """
                 UPDATE users
-                SET is_seeded = 1
+                SET name = ?, role = ?, is_seeded = 1
                 WHERE id = ?
                 """,
-                (existing["id"],),
+                (
+                    seed["name"],
+                    seed["role"],
+                    existing["id"],
+                ),
             )
-
             conn.commit()
+
 
 
     conn.close()
