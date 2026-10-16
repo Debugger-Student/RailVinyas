@@ -277,6 +277,7 @@ class BlockRequest(BaseModel):
     weather: str
     planned_duration_min: float
     date: str  # YYYY-MM-DD
+    dry_run: bool = False
 
 
 # ============================================================
@@ -659,7 +660,7 @@ def recommend(
     # Persist this request to the live log (see /api/blocks/log)
     # --------------------------------------------------------
 
-    log_id = log_recommendation(req, best, selected, user)
+    log_id = None if req.dry_run else log_recommendation(req, best, selected, user)
 
 
     # --------------------------------------------------------
