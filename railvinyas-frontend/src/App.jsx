@@ -1,4 +1,5 @@
 // src/App.jsx
+import ChatBot from "./components/ChatBot";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { Layout, ProtectedRoute } from "./components/ui";
@@ -47,6 +48,8 @@ function AppRoutes() {
 
       <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} />} />
     </Routes>
+    {isAuthenticated && <ChatBot />}
+  </>
   );
 }
 
