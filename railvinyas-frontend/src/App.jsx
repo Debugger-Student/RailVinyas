@@ -17,6 +17,7 @@ function AppRoutes() {
   const { isAuthenticated } = useAuth();
 
   return (
+    <>
     <Routes>
 
       <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" /> : <Login />} />
