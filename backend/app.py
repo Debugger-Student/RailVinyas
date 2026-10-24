@@ -33,11 +33,13 @@ Render:
     python -m uvicorn backend.app:app --host 0.0.0.0 --port $PORT
 """
 
+import os
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
+import requests
 import xgboost as xgb
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -993,6 +995,72 @@ def blocks_log(limit: int = 20, user=Depends(get_current_user)):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ============================================================
+# AI ASSISTANT API (Agent37 / Hermes chatbot proxy)
+# ============================================================
+# The browser never sees the Agent37 key. React calls this endpoint,
+# and this server forwards the message to the Hermes agent.
+#
+# Render environment variables required:
+#   AGENT37_API_KEY      sk_live_... key from agent37.com/dashboard/cloud/api-keys
+#   AGENT37_INSTANCE_ID  the agent's instance id (e.g. ya2iuz87z7)
+#
+# Access is limited to Admin / Section Controller while the agent has a
+# shell. Widen the role list only after the agent's account and secrets
+# are locked down.
+
+class AssistantRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+
+
+@app.post("/api/assistant")
+def assistant(
+    req: AssistantRequest,
+    user=Depends(require_role("Admin", "Section Controller")),
+):
+    key = os.environ.get("AGENT37_API_KEY")
+    inst = os.environ.get("AGENT37_INSTANCE_ID")
+
+    if not key or not inst:
+        raise HTTPException(status_code=503, detail="Assistant is not configured")
+
+    msg = req.message.strip()[:1000]
+    if not msg:
+        raise HTTPException(status_code=400, detail="Empty message")
+
+    body = {"input": msg}
+    if req.session_id:
+        body["session_id"] = req.session_id
+
+    try:
+        r = requests.post(
+            f"https://{inst}.agent37.app/v1/responses",
+            headers={"X-Agent37-Key": key},
+            json=body,
+            timeout=180,
+        )
+    except requests.RequestException:
+        raise HTTPException(
+            status_code=504,
+            detail="Assistant is waking up, try again in a minute",
+        )
+
+    if r.status_code == 409:
+        raise HTTPException(status_code=409, detail="Assistant is busy, try again in a moment")
+    if not r.ok:
+        raise HTTPException(status_code=502, detail=f"Assistant error ({r.status_code})")
+
+    d = r.json()
+    if d.get("status") != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail=(d.get("error") or {}).get("message", "Assistant failed"),
+        )
+
+    return {"reply": d.get("output_text", ""), "session_id": d.get("session_id")}
 
 
 # ============================================================
